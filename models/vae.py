@@ -6,100 +6,71 @@ import torch
 import torch.cuda.amp as amp
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.common_types import _size_3_t
+from torch.nn.modules.utils import _triple
 from einops import rearrange
 
 __all__ = ['WanVAE']
 
 CACHE_T = 2  # Frames to cache
 
-class CacheManager:
-    """
-    Centralized cache manager for all causal convolutions.
-
-    Design: Each CausalConv3d layer auto-registers and auto-manages its cache.
-    """
-
-    def __init__(self):
-        self.caches: List[Optional[torch.Tensor]] = []
-        self.index = 0
-        self.enabled = False
-
-    def enable(self, num_layers: int):
-        self.caches = [None] * num_layers
-        self.index = 0
-        self.enabled = True
-
-    def disable(self):
-        self.caches = []
-        self.index = 0
-        self.enabled = False
-
-    def reset(self):
-        self.index = 0
-
-    def next_cache(self) -> Optional[torch.Tensor]:
-        if not self.enabled or self.index >= len(self.caches):
-            return None
-        cache = self.caches[self.index]
-        self.index += 1
-        return cache
-    
-    def update_cache(self, new_cache: torch.Tensor):
-        if self.enabled and self.index > 0:
-            self.caches[self.index - 1] = new_cache
-
-class CausalConv3d(nn.Module):
-    _cache_manager: Optional[CacheManager] = None
-
-    @classmethod
-    def set_cache_manager(cls, manager: Optional[CacheManager]):
-        """Set global cache manager."""
-        cls._cache_manager = manager
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+class CausalConv3d(nn.Conv3d):
+    def __init__(self,
+                 in_channels: int,
+                out_channels: int,
+                kernel_size: _size_3_t,
+                stride: _size_3_t = 1,
+                padding: Union[str, _size_3_t] = 0,
+                dilation: _size_3_t = 1,
+                groups: int = 1,
+                bias: bool = True,):
+        k_t, k_h, k_w = _triple(kernel_size)
+        s_t, s_h, s_w = _triple(stride)
+        d_t, d_h, d_w = _triple(dilation)
         
-        if isinstance(self.padding, int):
-            self.padding = (self.padding, self.padding, self.padding)
-            
-        self.causal_padding_t = self.padding[0]
-
-        self._padding = (
-            self.padding[2], self.padding[2],  # W
-            self.padding[1], self.padding[1],  # H
-            2 * self.padding[0], 0              # T (causal)
+        self.causal_padding_t = (k_t - 1) * d_t
+        
+        padding_h, padding_w = 0, 0
+        if isinstance(padding, int):
+            padding_h = padding
+            padding_w = padding
+        else:
+            raise NotImplementedError
+        
+        self.spatial_padding_h = padding_h
+        self.spatial_padding_w = padding_w
+        
+        self.padding_tuple = (
+            self.spatial_padding_w, self.spatial_padding_w, # W (dim 4)
+            self.spatial_padding_h, self.spatial_padding_h, # H (dim 3)
+            self.causal_padding_t, 0                         # T (dim 2) [左填充, 右填充=0]
         )
 
-        # 重置父类的 padding，因为我们使用 F.pad 手动管理
-        self.padding = (0, 0, 0)
-
-    def forward(self, x: torch.Tensor, 
-                  cache: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        显式管理缓存的 forward。
-
-        Args:
-            x (torch.Tensor): 输入张量 [B, C, T, H, W]。
-                               在自回归（autoregressive）模式下, T 可能是 1。
-            cache (Optional[torch.Tensor]): 
-                               来自上一步的缓存 [B, C, P, H, W]，
-                               其中 P == self.causal_padding_t * 2。
-
-        Returns:
-            Tuple[torch.Tensor, torch.Tensor]:
-            - output: 卷积后的输出张量
-            - new_cache: 用于下一步的新缓存
-        """
-
-        P = self._padding[4] # 时间维度的前填充大小
-
-        if x.shape[2] < P:
-            if cache is not None:
-                shortfall = P - x.shape[2]
-                prev_frames = cache[:, :, -shortfall:, :, :]
-                new_x = torch.cat([prev_frames, x], dim=2)
-
-
+        super().__init__(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=0, # <<< 核心：禁止父类自动填充
+            dilation=dilation,
+            groups=groups,
+            bias=bias
+        )
+        
+    def forward(self, x: torch.Tensor, cache_x: torch.Tensor = None) -> torch.Tensor:
+        padding_to_apply = list(self.padding_tuple)
+        T_LEFT_INDEX = 4
+        
+        if cache_x is not None:
+            if self.causal_padding_t > 0:
+                cache_x = cache_x.to(x.device)
+                x = torch.cat([cache_x, x], dim=2)
+                padding_needed = max(0, self.causal_padding_t - cache_x.shape[2])
+                padding_to_apply[T_LEFT_INDEX] = padding_needed
+                
+        x_padded = F.pad(x, padding_to_apply)
+        
+        return super().forward(input)
 
 class Decoder3d(nn.Module):
     def __init__(
@@ -123,4 +94,4 @@ class Decoder3d(nn.Module):
         dims = [dim * u for u in [dim_mult[-1]] + dim_mult[::-1]]
         scale = 1.0 / 2 ** (len(dim_mult) - 2)
 
-        self.conv1 = 
+        self.conv1 = CausalConv3d(z_dim, dims[0], 3, padding=1)
