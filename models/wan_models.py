@@ -6,8 +6,7 @@ from torch import nn
 from .causal_model import CausalWanModel
 from ..scheduler import FlowMatchScheduler
 
-class WanVaeProcessor(nn.Module):
-    
+
 
 class WanDiffusionPredictor(nn.Module):
     def __init__(self,

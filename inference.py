@@ -7,10 +7,6 @@ from enum import Enum
 
 from misc import set_seed
 
-class VAECompileMode(str, Enum):
-    AUTO = "auto"
-    FORCE = "force"
-    NONE = "none"
 
 def main(
     config_path: Path = typer.Option(
@@ -51,6 +47,8 @@ def main(
 ):
     set_seed(seed)
     os.makedirs(output_folder, exist_ok=True)
+
+
     
 
 if __name__ == "__main__":
