@@ -206,7 +206,7 @@ class FlowMatchScheduler(DiffusionScheduler):
             (self.timesteps.unsqueeze(0) - timestep.unsqueeze(1)).abs(),
             dim=1
         )
-        sigma = self.sigmas[timestep_id].view(-1, 1, 1, 1)
+        sigma = self.sigmas[timestep_id].reshape(-1, 1, 1, 1)
 
         noisy_samples = (1 - sigma) * original_samples + sigma * noise
 
@@ -222,4 +222,20 @@ class FlowMatchScheduler(DiffusionScheduler):
         if timestep.ndim == 2:
             timestep = timestep.flatten(0, 1)
 
-        
+        self.sigmas = self.sigmas.to(model_output.device) # type: ignore
+        self.timesteps = self.timesteps.to(model_output.device) # type: ignore
+
+        timestep_id = torch.argmin(
+            (self.timesteps.unsqueeze(0) - timestep.unsqueeze(1)).abs(),
+            dim=1
+        )
+        sigma = self.sigmas[timestep_id].reshape(-1, 1, 1, 1)
+
+        if to_final or (timestep_id + 1 >= len(self.timesteps)).any():
+            sigma_next = 1 if (self.inverse_timesteps or self.reverse_sigmas) else 0
+        else:
+            sigma_next = self.sigmas[timestep_id + 1].reshape(-1, 1, 1, 1)
+
+        prev_sample = sample + (sigma_next - sigma) * model_output
+
+        return prev_sample

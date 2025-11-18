@@ -17,5 +17,8 @@ context_noise: 0
 mode: universal
 causal: true
 
+cache:
+  local_attn_size: 15
+
 timestep_shift: 5.0
 model_config_path: configs/universal/config.json

@@ -7,6 +7,7 @@ into type-safe, well-documented dataclasses.
 
 from dataclasses import dataclass, field
 from typing import Optional
+from omegaconf import OmegaConf
 
 
 @dataclass
@@ -168,6 +169,9 @@ class InferenceConfig:
     context_noise: int = 0
     """Noise level when caching context (0 = clean)"""
 
+    timestep_shift: float = 5.0
+    """Timestep shift applied during inference"""
+
     num_frame_per_block: int = 1
     """Number of frames to generate per block"""
 
@@ -222,34 +226,21 @@ class PipelineConfig:
         self.inference.validate(self.vae)
 
     @classmethod
-    def from_legacy_args(cls, args) -> 'PipelineConfig':
-        """
-        Create PipelineConfig from legacy args object.
+    def load(cls, config_path: str) -> 'PipelineConfig':
+        config = OmegaConf.load(config_path)
 
-        This is a compatibility layer for migrating from the old code.
-
-        Args:
-            args: Legacy args object (e.g., from OmegaConf)
-
-        Returns:
-            PipelineConfig instance
-        """
-        # Extract model config
-        model_kwargs = getattr(args, "model_kwargs", {})
-        model_config_path = model_kwargs.get("model_config", "")
+        model_config_path = config.model_config_path
 
         # For now, use defaults - in a real migration, you'd parse model_config
         model_config = ModelConfig()
 
-        # Extract cache config
-        local_attn_size = getattr(args, "local_attn_size", 15)
+        local_attn_size = config.cache.local_attn_size
         cache_config = CacheConfig(local_attn_size=local_attn_size)
 
-        # Extract inference config
-        denoising_steps = getattr(args, "denoising_step_list", [1000, 750, 500, 250])
-        warp_denoising = getattr(args, "warp_denoising_step", True)
-        context_noise = getattr(args, "context_noise", 0)
-        num_frame_per_block = getattr(args, "num_frame_per_block", 1)
+        denoising_steps = config.denoising_steps
+        warp_denoising = config.warp_denoising_step
+        context_noise = config.context_noise
+        num_frame_per_block = config.num_frame_per_block
 
         inference_config = InferenceConfig(
             denoising_steps=denoising_steps,
@@ -261,9 +252,8 @@ class PipelineConfig:
         # Extract VAE config (using defaults for now)
         vae_config = VAEConfig()
 
-        # Extract mode
-        mode = getattr(args, "mode", "universal")
-
+        mode = config.mode
+        
         return cls(
             model=model_config,
             cache=cache_config,

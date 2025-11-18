@@ -32,7 +32,6 @@ class InteractiveGamePipeline:
     def _init_model(self, pretrained_model_path: str, compile_mode: VAECompileMode):
         predictor = WanDiffusionPredictor(
             model_config_path=self.config.model_config_path,
-            timestep_shift=self.config.timestep_shift,
             is_causal=True)
         
         vae_decoder = VaeDecoderWrapper()
