@@ -6,6 +6,29 @@ from diffusers.models.modeling_utils import ModelMixin
 from diffusers.loaders.single_file_model import FromOriginalModelMixin
 from diffusers.loaders.peft import PeftAdapterMixin
 
+from .modular_action.action_module import ActionModule
+
+class CausalWanSelfAttention(nn.Module):
+    def __init__(self,
+                 dim,
+                 num_heads,
+                 local_attn_size=-1,
+                 sink_size=0,
+                 qk_norm=True,
+                 eps=1e-6):
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.local_attn_size = local_attn_size
+        self.sink_size = sink_size
+        self.qk_norm = qk_norm
+        self.eps = eps
+
+        self.norm = nn.LayerNorm(dim, eps=eps, elementwise_affine=False)
+
+        self.self_attn =
+
 class CausalWanAttentionBlock(nn.Module):
     def __init__(self,
                  cross_attn_type,
@@ -29,8 +52,15 @@ class CausalWanAttentionBlock(nn.Module):
         self.eps = eps
 
         if len(action_config) != 0 and block_idx in action_config['blocks']:
-            self.action_model = Action
+            self.action_model = ActionModule(action_config=action_config)
+        else:
+            self.action_model = None
 
+        self.norm1 = nn.LayerNorm(dim, eps=eps, elementwise_affine=False)
+        self.norm2 = nn.LayerNorm(dim, eps=eps, elementwise_affine=False)
+        self.norm3 = nn.LayerNorm(dim, eps=eps, elementwise_affine=True) if cross_attn_norm else nn.Identity()
+
+        self.self_attn = 
 
 class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapterMixin):
     ignore_for_config = [
