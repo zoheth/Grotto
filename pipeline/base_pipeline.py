@@ -29,7 +29,8 @@ class BaseCausalInferencePipeline(torch.nn.Module, ABC):
         config: PipelineConfig,
         predictor: WanDiffusionPredictor,
         vae_decoder,
-        device: str = "cuda"
+        device: str = "cuda",
+        page_size: int = 16
     ):
         super().__init__()
         self.config = config
@@ -39,8 +40,8 @@ class BaseCausalInferencePipeline(torch.nn.Module, ABC):
 
         self.scheduler = FlowMatchScheduler(
             num_train_timesteps=1000,
-            shift=self.config.inference.timestep_shift
-            sigma_min=0.0
+            shift=self.config.inference.timestep_shift,
+            sigma_min=0.0,
             extra_one_step=True
         )
         self.scheduler.set_timesteps(num_inference_steps=1000)
@@ -57,5 +58,3 @@ class BaseCausalInferencePipeline(torch.nn.Module, ABC):
             mode=config.mode
         )
         print(f"Initialized {self.__class__.__name__} with {config.inference.num_frame_per_block} frames per block")
-
-        
