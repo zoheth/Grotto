@@ -1,6 +1,6 @@
 import math
 import torch
-from typing import Optional
+from typing import Optional, Tuple
 
 from flashinfer import BatchPrefillWithPagedKVCacheWrapper
 

@@ -239,3 +239,44 @@ class FlowMatchScheduler(DiffusionScheduler):
         prev_sample = sample + (sigma_next - sigma) * model_output
 
         return prev_sample
+    
+    def convert_flow_to_x0(
+        self,
+        flow_pred: torch.Tensor,
+        xt: torch.Tensor,
+        timestep: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Convert flow prediction to x0 (clean sample) prediction.
+
+        Flow matching: v = noise - x_0
+        x_t = (1 - sigma_t) * x_0 + sigma_t * noise
+        Therefore: x_0 = x_t - sigma_t * v
+
+        Args:
+            flow_pred: Flow prediction [B, C, H, W]
+            xt: Noisy sample [B, C, H, W]
+            timestep: Timesteps [B]
+
+        Returns:
+            x0 prediction [B, C, H, W]
+        """
+        original_dtype = flow_pred.dtype
+
+        # Use double precision for numerical stability
+        flow_pred = flow_pred.double().to(flow_pred.device)
+        xt = xt.double().to(flow_pred.device)
+        sigmas = self.sigmas.double().to(flow_pred.device)
+        timesteps = self.timesteps.double().to(flow_pred.device)
+
+        # Find sigma for timestep
+        timestep_id = torch.argmin(
+            (timesteps.unsqueeze(0) - timestep.unsqueeze(1)).abs(),
+            dim=1
+        )
+        sigma_t = sigmas[timestep_id].reshape(-1, 1, 1, 1)
+
+        # Derive x0
+        x0_pred = xt - sigma_t * flow_pred
+
+        return x0_pred.to(original_dtype)
