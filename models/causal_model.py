@@ -1,344 +1,228 @@
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict, Tuple, List
 from torch import nn
 import torch
 import math
+from einops import rearrange
 
 from diffusers.configuration_utils import ConfigMixin, register_to_config
-from torch.nn.attention.flex_attention import BlockMask
 from diffusers.models.modeling_utils import ModelMixin
 from diffusers.loaders.single_file_model import FromOriginalModelMixin
 from diffusers.loaders.peft import PeftAdapterMixin
-from flashinfer import BatchPrefillWithPagedKVCacheWrapper
 
 from .modular_action.action_module import ActionModule
+from .cross_attention import I2VCrossAttention
+from .causal_self_attention import CausalSelfAttention, FlashInferPlanner
 from .paged_cache import PagedCache
-
-class PrecomputedRoPE3DCache:
-    def __init__(
-            self,
-            freqs: torch.Tensor, # Original freqs [1024, head_dim//2]
-            max_frames: int = 1024,
-            height: int = 22,  # After patchification (352 / 16)
-        width: int = 40,   # After patchification (640 / 16)
-        device: Optional[torch.device] = None,
-    ):
-        self.max_frames = max_frames
-        self.height = height
-        self.width = width
-        self.device = device or freqs.device
-        self.dtype = freqs.dtype
-
-        head_dim_half = freqs.shape[1]
-        c = head_dim_half
-        self.c_time = c - 2 * (c // 3)
-        self.c_height = c // 3
-        self.c_width = c // 3
-        self.head_dim_half = head_dim_half
-
-        # Store only the 1D frequency components (memory efficient!)
-        # These are small: [1024, c_time/c_height/c_width] each
-        self.freqs_time = freqs[:, :self.c_time].to(self.device)       # [1024, c_time]
-        self.freqs_height = freqs[:, self.c_time:self.c_time + self.c_height].to(self.device)  # [1024, c_height]
-        self.freqs_width = freqs[:, self.c_time + self.c_height:].to(self.device)   # [1024, c_width]
-
-    def get_freqs_for_frame_range(
-            self,
-            start_frame: int,
-            num_frames: int
-    ) -> torch.Tensor:
-        end_frame = start_frame + num_frames
-
-        if end_frame > self.freqs_time.shape[0]:
-            raise ValueError(
-                f"Frame range [{start_frame}:{end_frame}] exceeds frequency table size {self.freqs_time.shape[0]}. "
-                f"The model's RoPE frequencies don't support this many frames."
-            )
         
-        F, H, W = num_frames, self.height, self.width
-
-        time_freqs = self.freqs_time[start_frame:end_frame].view(F, 1, 1, -1).expand(F, H, W, -1)  # [F, H, W, c_time]
-        height_freqs = self.freqs_height[:H].view(1, H, 1, -1).expand(F, H, W, -1)  # [F, H, W, c_height]
-        width_freqs = self.freqs_width[:W].view(1, 1, W, -1).expand(F, H, W, -1)    # [F, H, W, c_width]
-
-        freqs = torch.cat([time_freqs, height_freqs, width_freqs], dim=-1)  # [F, H, W, head_dim//2]
-
-        freqs = freqs.view(F * H * W, 1, self.head_dim_half)  # [F*H*W, 1, head_dim//2]
-        
-        return freqs
-    
-def apply_rope_3d_precomputed(
-    x: torch.Tensor,  # [B, seq_len, num_heads, head_dim]
-    freqs: torch.Tensor,  # [seq_len, 1, head_dim//2]
-) -> torch.Tensor:
-    B, seq_len, num_heads, head_dim = x.shape
-
-    x_complex = torch.view_as_complex(
-        x.reshape(B, seq_len, num_heads, head_dim // 2, 2).to(torch.float64)
-    )
-    # Apply rotation (broadcast over batch and heads)
-    # freqs: [seq_len, 1, head_dim//2]
-    # x_complex: [B, seq_len, num_heads, head_dim//2]
-    x_rotated = x_complex * freqs.unsqueeze(0) # [B, seq_len, num_heads, head_dim//2]
-    x_out = torch.view_as_real(x_rotated).flatten(-2) # [B, seq_len, num_heads, head_dim]
-    return x_out.type_as(x)
-
-class FlashInferPlanner:
-    def __init__(
-        self,
-        num_heads: int,
-        head_dim: int,
-        page_size: int,
-        workspace_size: int = 128 * 1024 * 1024,  # 128MB
-    ):
-        self.num_heads = num_heads
-        self.head_dim = head_dim
-        self.page_size = page_size
-        self.workspace_size = workspace_size
-
-        self._workspace_buffer: Optional[torch.Tensor] = None
-        self._prefill_wrapper: Optional[BatchPrefillWithPagedKVCacheWrapper] = None
-        self._is_planned = False
-
-    def init(self, device: torch.device) -> None:
-
-        if self._workspace_buffer is None:
-            self._workspace_buffer = torch.empty(
-                self.workspace_size,
-                dtype=torch.uint8,
-                device=device
-            )
-
-        if self._prefill_wrapper is None:
-            self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                self._workspace_buffer,
-                kv_layout="NHD"
-            )
-
-    def plan(
-        self,
-        kv_cache: PagedCache,
-        q_len: int,
-        device: torch.device,
-        q_dtype: torch.dtype,
-    ) -> None:
-        """
-        Execute plan for the current generation step.
-
-        This should be called ONCE per generation step, before any attention layers.
-        All layers will share this plan.
-        """
-
-        self.init(device)
-
-        # Get FlashInfer metadata from cache
-        paged_kv_indices, paged_kv_indptr, paged_kv_last_page_len = kv_cache.get_flashinfer_meta(device)
-
-        # Build qo_indptr for single batch
-        qo_indptr = torch.tensor([0, q_len], dtype=torch.int32, device=device)
-
-        # Plan the paged attention
-        self._prefill_wrapper.plan(
-            qo_indptr=qo_indptr,
-            paged_kv_indptr=paged_kv_indptr,
-            paged_kv_indices=paged_kv_indices,
-            paged_kv_last_page_len=paged_kv_last_page_len,
-            num_qo_heads=self.num_heads,
-            num_kv_heads=self.num_heads,
-            head_dim_qk=self.head_dim,
-            page_size=self.page_size,
-            causal=False,  # Already handled by cache management
-            q_data_type=q_dtype,
-        )
-
-        self._is_planned = True
-
-    def run(
-        self,
-        q: torch.Tensor,  # [q_len, num_heads, head_dim]
-        kv_cache: PagedCache,
-    ) -> torch.Tensor:
-        """
-        Run paged attention using the pre-computed plan.
-
-        Args:
-            q: Query tensor [q_len, num_heads, head_dim]
-            kv_cache: Layer-specific PagedCache
-
-        Returns:
-            Attention output [q_len, num_heads, head_dim]
-        """
-        if not self._is_planned:
-            raise RuntimeError("FlashInferPlanner.plan() must be called before run()")
-
-        return self._prefill_wrapper.run(
-            q,
-            (kv_cache.k_cache, kv_cache.v_cache),
-        )
-
-    @property
-    def is_planned(self) -> bool:
-        return self._is_planned
-
-    def reset(self) -> None:
-        """Reset plan state. Call at the start of each generation step if needed."""
-        self._is_planned = False
-        
-
-class CausalSelfAttention(nn.Module):
-    def __init__(self,
-        dim: int,
-        num_heads: int,
-        local_attn_size: int = -1,
-        sink_size: int = 0,
-        qk_norm: bool = True,
-        eps: float = 1e-6,
-        max_frames: int = 1024,
-        height: int = 22,
-        width: int = 40,
-        page_size: int = 16):
-
+class SinusoidalEmbedding(nn.Module):
+    def __init__(self, dim, max_period=10000):
         super().__init__()
         self.dim = dim
+        half = dim // 2
+
+        freqs = torch.exp(
+            -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
+        )
+        self.register_buffer('freqs', freqs)
+
+    def forward(self, t: torch.Tensor) -> torch.Tensor:
+        # t: [Batch] or [Batch, Frames]
+        args = t.float().unsqueeze(-1) * self.freqs[None, :]
+        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+        return embedding
+
+class CausalWanAttentionBlock(nn.Module):
+    def __init__(self,
+                 dim,
+                 ffn_dim,
+                 num_heads,
+                 local_attn_size=-1,
+                 sink_size=0,
+                 num_frame_per_block=1,
+                 qk_norm=True,
+                 cross_attn_norm=False,
+                 action_config={},
+                 block_idx=0,
+                 eps=1e-6):
+        super().__init__()
+        self.dim = dim
+        self.ffn_dim = ffn_dim
         self.num_heads = num_heads
-        self.head_dim = dim // num_heads
         self.local_attn_size = local_attn_size
-        self.sink_size = sink_size
         self.qk_norm = qk_norm
+        self.cross_attn_norm = cross_attn_norm
         self.eps = eps
 
-        # Spatial dimensions
-        self.max_frames = max_frames
-        self.height = height
-        self.width = width
-        self.frame_seq_len = height * width
-        self.max_attention_size = (
-            15 * self.frame_seq_len if local_attn_size == -1 
-            else local_attn_size * self.frame_seq_len
+        if len(action_config) != 0 and block_idx in action_config['blocks']:
+            self.action_model = ActionModule(**action_config, local_attn_size=self.local_attn_size)
+        else:
+            self.action_model = None
+
+        self.norm1 = nn.LayerNorm(dim, eps, elementwise_affine=False)
+        self.norm2 = nn.LayerNorm(dim, eps, elementwise_affine=False)
+        self.norm3 = nn.LayerNorm(dim, eps, elementwise_affine=True) if cross_attn_norm else nn.Identity()
+
+        self.self_attn = CausalSelfAttention(dim, num_heads, local_attn_size, sink_size, num_frame_per_block, qk_norm, eps)
+        self.cross_attn = I2VCrossAttention(
+            dim, num_heads, (-1, -1), qk_norm, eps
         )
 
-        self.q = nn.Linear(dim, dim)
-        self.k = nn.Linear(dim, dim)
-        self.v = nn.Linear(dim, dim)
-        self.o = nn.Linear(dim, dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, ffn_dim),
+            nn.GELU(approximate='tanh'),
+            nn.Linear(ffn_dim, dim)
+        )
 
-        self.norm_q = nn.RMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
-        self.norm_k = nn.RMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
-
-        # RoPE cache (initialized lazily on first forward)
-        self.rope_cache: Optional[PrecomputedRoPE3DCache] = None
-
-        self._workspace_buffer: Optional[torch.Tensor] = None
-        self._prefill_wrapper: Optional[BatchPrefillWithPagedKVCacheWrapper] = None
+        # AdaLN modulation parameters [1, 6, C] for (shift_msa, scale_msa, gate_msa, shift_ffn, scale_ffn, gate_ffn)
+        self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
 
     def forward(
-            self,
-            x: torch.Tensor, # [B, seq_len, dim]
-            grid_sizes: Tuple[int, int, int],  # (F, H, W) for current frame
-            freqs: torch.Tensor,  # [1024, head_dim//2]
-            planner: FlashInferPlanner,
-            kv_cache: Optional[PagedCache] = None,
-            current_start: int = 0,
-            cache_start: Optional[int] = None
+        self,
+        x: torch.Tensor,
+        ada_params: torch.Tensor,
+        grid_sizes: Tuple[int, int, int],
+        freqs: torch.Tensor,
+        context: torch.Tensor,
+        kv_cache: Optional[dict] = None,
+        current_start: int = 0,
+        cache_start: Optional[int] = None,
+        action_context: Optional[ActionContext] = None,
+        planner: Optional[FlashInferPlanner] = None, 
     ) -> torch.Tensor:
-        """
-        Forward pass with FlashInfer attention.
-
-        When kv_cache is None: Full attention (training/first frame)
-        When kv_cache is provided: Incremental attention with KV cache
+        r"""
+        Forward pass through the attention block.
 
         Args:
-            x: Input hidden states [B, seq_len, dim]
-            seq_lens: Sequence lengths [B]
-            grid_sizes: [F, H, W] grid dimensions
-            freqs: RoPE frequencies [1024, head_dim//2]
-            block_mask: Attention mask (unused with FlashInfer)
-            kv_cache: KV cache dictionary
-            current_start: Current position in sequence
-            cache_start: Start position of cache
+            x: Hidden states [B, L, C]
+            ada_params: AdaLN modulation parameters [B, F, 6, C] where F = num_frames
+            grid_sizes: Spatial-temporal grid (num_frames, height, width) as tuple
+            freqs: RoPE frequencies [max_len, head_dim/2]
+            context: Visual context for cross-attention
+            block_mask: Attention mask for self-attention
+            kv_cache: KV cache for self-attention
+            current_start: Current position in sequence (for cache indexing)
+            action_context: Optional ActionContext encapsulating all action-related parameters
+            planner: FlashInferPlanner (must be pre-planned before calling)
 
         Returns:
-            Output hidden states [B, seq_len, dim]
+            Updated hidden states [B, L, C]
         """
-        B, S, H, D = *x.shape[:2], self.num_heads, self.head_dim
+        L = x.shape[1]
+        num_frames = ada_params.shape[1]
+        frame_seqlen = L // num_frames
 
-        if cache_start is None:
-            cache_start = current_start
+        # Combine learned modulation with input modulation
+        # [1, 6, C] + [B, F, 6, C] → [B, F, 6, C]
+        combined_modulation = self.modulation.unsqueeze(1) + ada_params
 
-        q = self.norm_q(self.q(x)).view(B, S, H, D)
-        k = self.norm_k(self.k(x)).view(B, S, H, D)
-        v = self.v(x).view(B, S, H, D)
+        # Split into 6 components: [B, F, 1, C] each after chunking
+        (
+            shift_msa, scale_msa, gate_msa, 
+            shift_ffn, scale_ffn, gate_ffn
+        ) = rearrange(combined_modulation, 'b f six c -> six b f 1 c')
 
-        if kv_cache is not None:
-            return self._forward_incremental(
-                q, k, v, grid_sizes, freqs, planner, kv_cache, current_start, cache_start
-            )
-        
-        else:
-            raise NotImplementedError("Full attention not implemented in this snippet.")
+        x_mod = self._adaln_modulate(self.norm1(x), shift_msa, scale_msa, f=num_frames)
+        y = self.self_attn(
+            x_mod,
+            grid_sizes,
+            freqs,
+            kv_cache,
+            current_start,
+            planner,
+        )
+        x = self._adaln_gated_residual(x, y, gate_msa, f=num_frames)
 
-    def _init_rope_cache(self, freqs: torch.Tensor):
-        if self.rope_cache is None:
-            self.rope_cache = PrecomputedRoPE3DCache(
-                freqs=freqs,
-                max_frames=self.max_frames,
-                height=self.height,
-                width=self.width,
-                device=freqs.device
-            )
-
-    def _forward_incremental(
-        self,
-        q: torch.Tensor,  # [B, seq_len, num_heads, head_dim]
-        k: torch.Tensor,
-        v: torch.Tensor,
-        grid_sizes: Tuple[int, int, int],  # (F, H, W) for current frame
-        freqs: torch.Tensor,
-        planner: FlashInferPlanner,
-        kv_cache: PagedCache,
-        current_start: int,
-        cache_start: int,
-    ) -> torch.Tensor:
-        F, H, W = grid_sizes
-
-        self._init_rope_cache(freqs)
-
-        frame_seqlen = H * W
-        current_start_frame = current_start // frame_seqlen
-        num_frames = F
-
-        assert self.rope_cache is not None
-        precomputed_freqs = self.rope_cache.get_freqs_for_frame_range(
-            current_start_frame, num_frames
+        x = self._apply_condition_attn(
+            x, context, grid_sizes,
+            current_start, action_context
         )
 
-        roped_q = apply_rope_3d_precomputed(q, precomputed_freqs)
-        roped_k = apply_rope_3d_precomputed(k, precomputed_freqs)
+        x_mod = self._adaln_modulate(self.norm2(x), shift_ffn, scale_ffn, f=num_frames)
+        y = self.ffn(x_mod)
+        x = self._adaln_gated_residual(x, y, gate_ffn, f=num_frames)
 
-        roped_k_squeezed = roped_k.squeeze(0)
-        v_squeezed = v.squeeze(0)
+        return x
+    
+    def _adaln_modulate(self, x_normed: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor, f: int) -> torch.Tensor:
+        """
+        Input:  x_normed [B, T, C], shift/scale [B, F, 1, C]
+        Output: [B, T, C] (Modulated)
+        """
+        x_view = rearrange(x_normed, 'b (f l) c -> b f l c', f=f)
+        x_mod = x_view * (1 + scale) + shift
+        return rearrange(x_mod, 'b f l c -> b (f l) c')
 
-        current_end = current_start + roped_k_squeezed.shape[0]
+    def _adaln_gated_residual(self, x: torch.Tensor, y: torch.Tensor, gate: torch.Tensor, f: int) -> torch.Tensor:
+        """
+        Input:  x [B, T, C] (Residual), y [B, T, C] (Branch), gate [B, F, 1, C]
+        Output: [B, T, C] (x + gate * y)
+        """
+        y_view = rearrange(y, 'b (f l) c -> b f l c', f=f)
+        y_gated = rearrange(y_view * gate, 'b f l c -> b (f l) c')
+        return x + y_gated
+    
+    def _apply_condition_attn(
+        self,
+        x: torch.Tensor,
+        context: torch.Tensor,
+        grid_sizes: tuple,  # (F, H, W)
+        current_start: int,
+        action_context: Optional[ActionContext]
+    ) -> torch.Tensor:
+        x = x + self.cross_attn(
+            self.norm3(x.to(context.dtype)),
+            context
+        )
 
-        kv_cache.update_or_append(roped_k_squeezed, v_squeezed, current_end)
+        # todo action module
 
-        kv_cache.evict(self.max_attention_size)
-
-        if not planner.is_planned:
-            planner.plan(
-                kv_cache=kv_cache,
-                    q_len=roped_q.shape[1],
-                    device=roped_q.device,
-                    q_dtype=roped_q.dtype,
-            )
-
-        q_for_flash = roped_q.squeeze(0)  # [q_len, num_heads, head_dim]
-        x = planner.run(q_for_flash, kv_cache)
-        x = x.unsqueeze(0)  # [1, q_len, num_heads, head_dim]
-
-        x = x.flatten(2)
-        x = self.o(x)
         return x
 
+
+class CausalHead(nn.Module):
+
+    def __init__(self, dim, out_dim, patch_size, eps=1e-6):
+        super().__init__()
+        self.dim = dim
+        self.out_dim = out_dim
+        self.patch_size = patch_size
+        self.eps = eps
+
+        # layers
+        out_dim = math.prod(patch_size) * out_dim
+        self.norm = nn.LayerNorm(dim, elementwise_affine=False, eps=eps)
+        self.head = nn.Linear(dim, out_dim)
+
+        # modulation
+        self.modulation = nn.Parameter(torch.randn(1, 2, dim) / dim**0.5)
+
+    def forward(self, x, e):
+        r"""
+        Args:
+            x(Tensor): Shape [B, L1, C] - Input features (L1 = F * S)
+            e(Tensor): Shape [B, F, 1, C] - Conditioning / AdaLN parameters
+        """
+        combined_style = e + self.modulation.unsqueeze(1)
+
+        shift, scale = rearrange(combined_style, 'b f two c -> two b f 1 c', two=2)
+
+        x = self.norm(x)
+
+        x = rearrange(x, 'b (f s) c -> b f s c', f=e.shape[1])
+
+        x = x * (1 + scale) + shift
+
+        return self.head(x)
+
+
+def get_rope_freqs_complex(max_seq_len, dim, theta=10000):
+    assert dim % 2 == 0
+    freqs = torch.outer(
+        torch.arange(max_seq_len),
+        1.0 / torch.pow(theta,
+                        torch.arange(0, dim, 2).to(torch.float64).div(dim)))
+    freqs = torch.polar(torch.ones_like(freqs), freqs)
+    return freqs
 
 class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapterMixin):
     ignore_for_config = [
@@ -390,6 +274,8 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
             in_dim, dim, kernel_size=patch_size, stride=patch_size
         )
 
+        self.pos_encoder = SinusoidalEmbedding(self.freq_dim)
+
         self.time_embedding = nn.Sequential(
             nn.Linear(freq_dim, dim), nn.SiLU(), nn.Linear(dim, dim)
         )
@@ -397,7 +283,92 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
             nn.SiLU(), nn.Linear(dim, dim * 6)
         )
 
-        cross_attn_type = 'i2v_cross_attn'
         self.blocks = nn.ModuleList([
-
+            CausalWanAttentionBlock(
+                dim, ffn_dim, num_heads,
+                local_attn_size, sink_size, self.num_frame_per_block,
+                qk_norm, cross_attn_norm, action_config=action_config, eps=eps, block_idx=idx
+            )
+            for idx in range(num_layers)
         ])
+
+        self.head = CausalHead(dim, out_dim, patch_size, eps)
+
+        assert (dim % num_heads) == 0 and (dim // num_heads) % 2 == 0
+        head_dim = dim // num_heads
+
+        split_size = head_dim // 6
+        dim_h = split_size * 2
+        dim_w = split_size * 2
+        dim_t = head_dim - dim_h - dim_w
+        max_pos = 1024
+        self.freqs = torch.cat([
+            get_rope_freqs_complex(max_pos, dim_t),
+            get_rope_freqs_complex(max_pos, dim_h),
+            get_rope_freqs_complex(max_pos, dim_w)
+        ],dim=1)
+
+        img_dim = 1280
+        self.img_emb = torch.nn.Sequential(
+            torch.nn.LayerNorm(img_dim), torch.nn.Linear(img_dim, img_dim),
+            torch.nn.GELU(), torch.nn.Linear(img_dim, dim),
+            torch.nn.LayerNorm(dim))
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        timesteps: torch.Tensor,
+        visual_context,
+        kv_cache: List[PagedCache],
+        ):
+        device = self.patch_embedding.weight.device
+        if self.freqs.device != device:
+            self.freqs = self.freqs.to(device)
+
+        _, C_in, F, H, W = x.shape
+        num_frames = F
+        frame_seqlen = H * W // (self.patch_size[1] * self.patch_size[2])
+
+        x = self.patch_embedding(x)
+        grid_sizes = tuple(x.shape[2:])
+        x = rearrange(x, 'b c f h w -> b (f h w) c')
+        assert x.shape[1] <= 15 * 1 * 880
+        
+        timesteps = timesteps.flatten()
+        e_raw = self.pos_encoder(timesteps)
+        e = self.time_embedding(e_raw.type_as(x))
+        
+        e_proj = self.time_projection(e) # Output: [Total_Batch, 6 * dim]
+
+        e0 = rearrange(e_proj, 'b (chunks d) -> b chunks d', chunks=6)
+
+        e0 = e0.view(*timesteps.shape, 6, -1)
+
+        context = self.img_emb(visual_context)
+
+        planner = None
+        first_cache = kv_cache[0]
+
+        head_dim = self.dim // self.num_heads
+        planner = FlashInferPlanner(
+            num_heads=self.num_heads,
+            head_dim=head_dim,
+            page_size=first_cache.page_size,
+        )
+
+        for block_index, block in enumerate(self.blocks):
+            x = block(
+                        x,
+                        ada_params=e0,
+                        grid_sizes=grid_sizes,
+                        freqs=self.freqs,
+                        context=context,
+                        action_context=action_context,
+                        kv_cache=kv_cache[block_index],
+                        current_start=current_start,
+                        planner=planner,
+                    )
+        
+        x = self.head(x, e.unflatten(dim=0, sizes=timesteps.shape).unsqueeze(2))
+        x = self.unpatchify(x, grid_sizes)
+        return x

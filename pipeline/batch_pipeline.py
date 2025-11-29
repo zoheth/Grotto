@@ -89,6 +89,29 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
 
         return denoised_pred # type: ignore
 
+    def _update_kv_cache_with_clean_context(
+        self,
+        denoised_pred: torch.Tensor,
+        conditional_dict: Dict[str, torch.Tensor],
+        current_start_frame: int,
+        batch_size: int
+    ) -> None:
+        current_num_frames = denoised_pred.shape[2]
+        context_timestep = torch.ones(
+            [batch_size, current_num_frames],
+            device=self.device,
+            dtype=torch.int64
+        ) * self.config.inference.context_noise
+
+        visual_cache = self.cache_manager.visual_cache
+
+        self.predictor(
+            noisy_image_or_video=denoised_pred,
+            conditional_dict=conditional_dict,
+            timestep=context_timestep,
+            kv_cache=visual_cache,
+            current_start=current_start_frame * self.config.model.frame_seq_length
+        )
 
     def inference(
         self,
@@ -150,4 +173,9 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
 
             output[:, :, current_start_frame:current_start_frame + current_num_frames] = denoised_pred
 
-            
+            self._update_kv_cache_with_clean_context(
+                denoised_pred,
+                block_cond,
+                current_start_frame,
+                batch_size
+            )

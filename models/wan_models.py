@@ -56,12 +56,17 @@ class WanDiffusionPredictor(nn.Module):
         mouse_cond = conditional_dict.get("mouse_cond")
         keyboard_cond = conditional_dict.get("keyboard_cond")
 
-        action_context = None
+        action_inputs = None
         if mouse_cond is not None or keyboard_cond is not None:
-            action_context = ActionInputs(
+            action_inputs = ActionInputs(
                 mouse_cond=mouse_cond,
                 keyboard_cond=keyboard_cond
             )
 
         if kv_cache is not None:
-            flow_pred = 
+            flow_pred = self.model(
+                noisy_image_or_video.to(self.model.dtype),
+                timesteps = input_timestep,
+                action_inputs = action_inputs,
+                
+            )
