@@ -15,13 +15,13 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
     def __init__(
         self,
         config: PipelineConfig,
-        generator,
+        predictor,
         vae_decoder,
         device: str = "cuda",
         page_size: int = 16,
     ):
         super().__init__(
-            config, generator, vae_decoder, device, page_size=page_size
+            config, predictor, vae_decoder, device, page_size=page_size
         )
         
 
@@ -49,7 +49,7 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
             batch_size: int
     ) -> torch.Tensor:
         current_num_frames = noisy_input.shape[2]
-        visual_cache = self.cache_manager.visual_cache
+        visual_cache, mouse_cache, keyboard_cache = self.cache_manager.get_caches()
         current_start = current_start_frame * self.config.model.frame_seq_length
 
         for index, current_timestep in enumerate(self.denoising_step_list):
@@ -64,6 +64,8 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
                 conditional_dict=conditional_dict,
                 timestep=timestep,
                 kv_cache=visual_cache,
+                kv_cache_mouse=mouse_cache,
+                kv_cache_keyboard=keyboard_cache,
                 current_start=current_start
             )
 
@@ -103,15 +105,37 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
             dtype=torch.int64
         ) * self.config.inference.context_noise
 
-        visual_cache = self.cache_manager.visual_cache
+        visual_cache, mouse_cache, keyboard_cache = self.cache_manager.get_caches()
 
         self.predictor(
             noisy_image_or_video=denoised_pred,
             conditional_dict=conditional_dict,
             timestep=context_timestep,
             kv_cache=visual_cache,
+            kv_cache_mouse=mouse_cache,
+            kv_cache_keyboard=keyboard_cache,
             current_start=current_start_frame * self.config.model.frame_seq_length
         )
+
+    def _decode_latent_to_video(
+        self,
+        latent: torch.Tensor,
+        vae_cache: List
+    ) -> tuple[torch.Tensor, List]:
+        """
+        Decode latent to video using VAE decoder.
+
+        Args:
+            latent: Latent tensor [batch, channels, frames, h, w]
+            vae_cache: VAE cache from previous decode
+
+        Returns:
+            Tuple of (decoded video, updated cache)
+        """
+        # Transpose for VAE decoder: [batch, frames, channels, h, w]
+        latent = latent.transpose(1, 2)
+        video, vae_cache = self.vae_decoder(latent.half(), *vae_cache)
+        return video, vae_cache
 
     def inference(
         self,
@@ -142,9 +166,6 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
 
         current_start_frame = 0
 
-        if profile:
-            diffusion_start = torch.cuda.Event(enable_timing=True)
-            diffusion_end = torch.cuda.Event(enable_timing=True)
 
         all_num_frames = [self.config.inference.num_frame_per_block] * num_blocks
 
@@ -159,10 +180,6 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
                 current_start_frame,
                 current_num_frames
             )
-
-            if profile:
-                torch.cuda.synchronize()
-                diffusion_start.record() # type: ignore
 
             denoised_pred = self._denoise_block(
                 noisy_input,
@@ -179,3 +196,13 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
                 current_start_frame,
                 batch_size
             )
+
+            video, vae_cache = self._decode_latent_to_video(denoised_pred, vae_cache)
+            videos.append(video)
+
+            current_start_frame += current_num_frames
+        
+        if return_latents:
+            return output
+        else:
+            return videos

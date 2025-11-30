@@ -131,6 +131,8 @@ class FlashInferPlanner:
         paged_kv_indices, paged_kv_indptr, paged_kv_last_page_len = kv_cache.get_flashinfer_meta(device)
         qo_indptr = torch.tensor([0, q_len], dtype=torch.int32, device=device)
 
+        assert self._prefill_wrapper is not None
+
         self._prefill_wrapper.plan(
             qo_indptr=qo_indptr,
             paged_kv_indptr=paged_kv_indptr,
@@ -152,6 +154,9 @@ class FlashInferPlanner:
         kv_cache: PagedCache,
     ) -> torch.Tensor:
         """Run paged attention using the pre-computed plan."""
+
+        assert self._prefill_wrapper is not None
+
         return self._prefill_wrapper.run(
             q,
             (kv_cache.k_cache, kv_cache.v_cache),
@@ -259,6 +264,8 @@ class CausalSelfAttention(nn.Module):
 
         self._init_rope_cache(freqs)
 
+        assert self.rope_cache is not None
+
         num_frames, height, width = grid_sizes
         frame_seqlen = height * width
         current_start_frame = current_start // frame_seqlen
@@ -274,7 +281,7 @@ class CausalSelfAttention(nn.Module):
         v_squeezed = v.squeeze(0)
         current_end = current_start + roped_k_squeezed.shape[0]
 
-        kv_cache.update_or_append(roped_k_squeezed, v_squeezed, current_start, current_end)
+        kv_cache.update_or_append(roped_k_squeezed, v_squeezed, current_end)
 
         # Block-aligned eviction to match training block_mask
         block_size = self.num_frame_per_block * frame_seqlen

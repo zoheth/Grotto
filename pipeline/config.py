@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from typing import Optional
 from omegaconf import OmegaConf
 
-
 @dataclass
 class ModelConfig:
     """
@@ -44,7 +43,6 @@ class ModelConfig:
     def total_attention_dim(self) -> int:
         """Total dimension of attention (num_heads * head_dim)"""
         return self.num_attention_heads * self.head_dim
-
 
 @dataclass
 class CacheConfig:
@@ -203,6 +201,8 @@ class PipelineConfig:
     This combines all sub-configurations into a single object.
     """
 
+    model_config_path: str
+
     model: ModelConfig = field(default_factory=ModelConfig)
     """Model architecture configuration"""
 
@@ -229,11 +229,6 @@ class PipelineConfig:
     def load(cls, config_path: str) -> 'PipelineConfig':
         config = OmegaConf.load(config_path)
 
-        model_config_path = config.model_config_path
-
-        # For now, use defaults - in a real migration, you'd parse model_config
-        model_config = ModelConfig()
-
         local_attn_size = config.cache.local_attn_size
         cache_config = CacheConfig(local_attn_size=local_attn_size)
 
@@ -255,7 +250,7 @@ class PipelineConfig:
         mode = config.mode
         
         return cls(
-            model=model_config,
+            model_config_path=config.model_config_path,
             cache=cache_config,
             vae=vae_config,
             inference=inference_config,

@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 from .config import PipelineConfig
 from .condition_processor import ConditionProcessor
-from ..models.wan_models import WanDiffusionPredictor
+from ..models.predictor import WanDiffusionPredictor
 from ..scheduler import FlowMatchScheduler
 
 class BaseCausalInferencePipeline(torch.nn.Module, ABC):

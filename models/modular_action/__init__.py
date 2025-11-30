@@ -1,49 +1,46 @@
 """
 Modular Action Module Package
+
+Terminology:
+    - View Control: Camera/view angle control (input: mouse, gamepad right stick)
+    - Movement: Character movement (input: keyboard WASD, gamepad left stick)
 """
 
 from .action_config import (
-    ActionConfig,
-    DEFAULT_ACTION_CONFIG,
-    SMALL_ACTION_CONFIG,
-    WAN_1_3B_ACTION_CONFIG,
-    get_action_config,
+    ActionConfig
 )
 
-from .action_module import ActionModule
+from .action_module import ActionModule, ActionContext
 
-from .injectors import (
-    MouseInjector,
-    KeyboardInjector,
+from .view_control import (
+    ViewControlInjector,
+    ViewControlPreprocessor,
+)
+from .movement_control import (
+    MovementInjector,
+    MovementPreprocessor,
 )
 
 from .interfaces import (
-    IAttentionInjector,
-    IActionPreprocessor,
-    KVCacheManager,
-    FlashInferAttentionCore,
-    WanRMSNorm,
+    ActionInjector,
+    AttentionKernel
 )
 
 __all__ = [
     # Main module
     "ActionModule",
+    "ActionContext",
 
     # Configuration
     "ActionConfig",
-    "DEFAULT_ACTION_CONFIG",
-    "SMALL_ACTION_CONFIG",
-    "WAN_1_3B_ACTION_CONFIG",
-    "get_action_config",
 
     # Injectors
-    "MouseInjector",
-    "KeyboardInjector",
+    "ViewControlInjector",
+    "MovementInjector",
+    "ViewControlPreprocessor",
+    "MovementPreprocessor",
 
-    # Interfaces
-    "IAttentionInjector",
-    "IActionPreprocessor",
-    "KVCacheManager",
-    "FlashInferAttentionCore",
-    "WanRMSNorm",
+    # Core components
+    "ActionInjector",
+    "AttentionKernel",
 ]

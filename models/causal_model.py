@@ -1,4 +1,5 @@
-from typing import Optional, Dict, Tuple, List
+from dataclasses import dataclass
+from typing import Optional, Dict, Tuple, List, TYPE_CHECKING
 from torch import nn
 import torch
 import math
@@ -13,7 +14,13 @@ from .modular_action.action_module import ActionModule
 from .cross_attention import I2VCrossAttention
 from .causal_self_attention import CausalSelfAttention, FlashInferPlanner
 from .paged_cache import PagedCache
-        
+
+from .modular_action import ActionModule, ActionConfig, ActionContext
+
+if TYPE_CHECKING:
+    from .ring_buffer_cache import RingBufferActionCache
+
+
 class SinusoidalEmbedding(nn.Module):
     def __init__(self, dim, max_period=10000):
         super().__init__()
@@ -27,11 +34,18 @@ class SinusoidalEmbedding(nn.Module):
 
     def forward(self, t: torch.Tensor) -> torch.Tensor:
         # t: [Batch] or [Batch, Frames]
-        args = t.float().unsqueeze(-1) * self.freqs[None, :]
+        args = t.float().unsqueeze(-1) * self.freqs[None, :]  # type: ignore
         embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
         return embedding
 
 class CausalWanAttentionBlock(nn.Module):
+    """
+    Transformer block with self-attention, cross-attention, optional action injection, and FFN.
+
+    Architecture:
+        x → [AdaLN + Self-Attention + Gate] → [Cross-Attention] → [Action?] → [AdaLN + FFN + Gate] → out
+    """
+
     def __init__(self,
                  dim,
                  ffn_dim,
@@ -54,7 +68,8 @@ class CausalWanAttentionBlock(nn.Module):
         self.eps = eps
 
         if len(action_config) != 0 and block_idx in action_config['blocks']:
-            self.action_model = ActionModule(**action_config, local_attn_size=self.local_attn_size)
+            config_dict = {**action_config, 'local_attn_size': local_attn_size}
+            self.action_model = ActionModule(ActionConfig.from_dict(config_dict))
         else:
             self.action_model = None
 
@@ -109,7 +124,6 @@ class CausalWanAttentionBlock(nn.Module):
         """
         L = x.shape[1]
         num_frames = ada_params.shape[1]
-        frame_seqlen = L // num_frames
 
         # Combine learned modulation with input modulation
         # [1, 6, C] + [B, F, 6, C] → [B, F, 6, C]
@@ -174,7 +188,27 @@ class CausalWanAttentionBlock(nn.Module):
             context
         )
 
-        # todo action module
+        if self.action_model is not None:
+            if action_context is None or not action_context.has_any_condition:
+                raise ValueError(
+                    "ActionModule is enabled but no ActionContext provided. "
+                    "Either pass action_context or use legacy action_kwargs."
+                )
+            
+            spatial_tokens_per_frame = int(grid_sizes[1] * grid_sizes[2])
+            start_frame = current_start // spatial_tokens_per_frame
+
+            x = self.action_model(
+                x.to(context.dtype),
+                grid_sizes,
+                mouse_condition=action_context.mouse_cond,
+                keyboard_condition=action_context.keyboard_cond,
+                is_causal=True,
+                kv_cache_mouse=action_context.kv_cache_mouse,
+                kv_cache_keyboard=action_context.kv_cache_keyboard,
+                start_frame=start_frame,
+                num_frame_per_block=action_context.num_frame_per_block,
+            )
 
         return x
 
@@ -246,6 +280,7 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
                  num_layers=30,
                  local_attn_size=-1,
                  sink_size=0,
+                 num_frame_per_block=1,
                  qk_norm=True,
                  cross_attn_norm=True,
                  action_config={},
@@ -266,6 +301,7 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
         self.num_heads = num_heads
         self.num_layers = num_layers
         self.local_attn_size = local_attn_size
+        self.num_frame_per_block = num_frame_per_block
         self.qk_norm = qk_norm
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
@@ -313,6 +349,8 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
             torch.nn.LayerNorm(img_dim), torch.nn.Linear(img_dim, img_dim),
             torch.nn.GELU(), torch.nn.Linear(img_dim, dim),
             torch.nn.LayerNorm(dim))
+        
+        self.init_weights()
 
     def forward(
         self,
@@ -320,7 +358,11 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
         timesteps: torch.Tensor,
         visual_context,
         kv_cache: List[PagedCache],
-        ):
+        action_context: Optional[ActionContext] = None,
+        kv_cache_mouse: Optional[List["RingBufferActionCache"]] = None,
+        kv_cache_keyboard: Optional[List["RingBufferActionCache"]] = None,
+        current_start: int = 0,
+    ):
         device = self.patch_embedding.weight.device
         if self.freqs.device != device:
             self.freqs = self.freqs.to(device)
@@ -336,7 +378,7 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
         
         timesteps = timesteps.flatten()
         e_raw = self.pos_encoder(timesteps)
-        e = self.time_embedding(e_raw.type_as(x))
+        e:torch.Tensor = self.time_embedding(e_raw.type_as(x))
         
         e_proj = self.time_projection(e) # Output: [Total_Batch, 6 * dim]
 
@@ -357,18 +399,61 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
         )
 
         for block_index, block in enumerate(self.blocks):
+
+            if action_context is not None:
+                action_context.kv_cache_mouse = kv_cache_mouse[block_index] if kv_cache_mouse else None
+                action_context.kv_cache_keyboard = kv_cache_keyboard[block_index] if kv_cache_keyboard else None
+
             x = block(
-                        x,
-                        ada_params=e0,
-                        grid_sizes=grid_sizes,
-                        freqs=self.freqs,
-                        context=context,
-                        action_context=action_context,
-                        kv_cache=kv_cache[block_index],
-                        current_start=current_start,
-                        planner=planner,
-                    )
+                x,
+                ada_params=e0,
+                grid_sizes=grid_sizes,
+                freqs=self.freqs,
+                context=context,
+                action_context=action_context,
+                kv_cache=kv_cache[block_index],
+                current_start=current_start,
+                planner=planner,
+            )
         
-        x = self.head(x, e.unflatten(dim=0, sizes=timesteps.shape).unsqueeze(2))
+        x = self.head(x, e.reshape(*timesteps.shape, 1, -1))
         x = self.unpatchify(x, grid_sizes)
         return x
+    
+    def unpatchify(self, x, grid_sizes):
+        f, h, w = grid_sizes
+        pt, ph, pw = self.patch_size
+       
+        return rearrange(
+            x, 
+            'b f (h w) (pt ph pw c) -> b c (f pt) (h ph) (w pw)',
+            f=f, h=h, w=w, 
+            pt=pt, ph=ph, pw=pw, 
+            c=self.out_dim
+        )
+
+    def init_weights(self):
+        r"""
+        Initialize model parameters using Xavier initialization.
+        """
+
+        # basic init
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+        # init embeddings
+        nn.init.xavier_uniform_(self.patch_embedding.weight.flatten(1))
+        
+        for m in self.time_embedding.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, std=.02)
+
+        # init output layer
+        nn.init.zeros_(self.head.head.weight)
+        if self.use_action_module:
+            for block in self.blocks:
+                if block.action_model is not None:
+                    block.action_model.init_weights() # type: ignore

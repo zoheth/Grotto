@@ -1,16 +1,32 @@
 import argparse
 import os
+import numpy as np
 
 import typer
 from pathlib import Path
 from enum import Enum
+from diffusers.utils.export_utils import export_to_video
+from diffusers.utils.loading_utils import load_image
 
 from misc import set_seed
+from .generator import VideoGenerator
 
+def process_video(input_video, output_video):
+    fps = 12
+    frame_count = len(input_video)
+    
+    out_video = []
+    frame_idx = 0
+    for frame in input_video:
+        out_video.append(frame / 255)
+        frame_idx += 1
+        print(f"Processing frame {frame_idx}/{frame_count}", end="\r")
+    export_to_video(out_video, output_video, fps=fps)
+    print("\nProcessing complete!")
 
 def main(
     config_path: Path = typer.Option(
-        "configs/inference_yaml/inference_universal.yaml", 
+        "configs/universal/inference.yaml", 
         help="Path to the config file"
     ),
     checkpoint_path: Path = typer.Option(
@@ -39,17 +55,19 @@ def main(
         help="Enable torch profiling",
     ),
 
-    vae_compile_mode: VAECompileMode = typer.Option(
-        VAECompileMode.AUTO,
-        help="VAE decoder compile mode",
-        case_sensitive=False
-    )
 ):
     set_seed(seed)
     os.makedirs(output_folder, exist_ok=True)
 
 
-    
+    generator = VideoGenerator(config_path, checkpoint_path, pretrained_model_path)
+
+    image = load_image(img_path._str)
+    video = generator.generate(image, num_output_frames)
+
+    process_video(video.astype(np.uint8), output_folder/'demo.mp4')
+
+    print("Done")
 
 if __name__ == "__main__":
     typer.run(main)

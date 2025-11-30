@@ -1,141 +1,33 @@
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import torch
 from torch import nn
 
-# Import optimized KV cache implementation
-from .kernels.kv_cache_kernel import update_kv_cache_optimized
-
 if TYPE_CHECKING:
     import flashinfer
 
-try:
-    import flashinfer
-    FLASHINFER_AVAILABLE = True
-except ImportError:
-    FLASHINFER_AVAILABLE = False
-    flashinfer = None  # type: ignore
-    print("Warning: flashinfer not available, falling back to flash_attn")
+import flashinfer
 
-class IActionPreprocessor(nn.Module, ABC):
-    """ (B, N_frames, C) -> (B, T_q_or_k, C_windowed)"""
-    def __init__(self, vae_time_compression_ratio: int, windows_size: int):
-        super().__init__()
-        self.vae_time_compression_ratio = vae_time_compression_ratio
-        self.windows_size = windows_size
-        self.pat_t = vae_time_compression_ratio * windows_size
-        
-    @abstractmethod
-    def forward(self, condition: torch.Tensor, N_feats: int, is_causal: bool, num_frame_per_block: int) -> torch.Tensor:
-        pass
-    
-class IAttentionInjector(nn.Module, ABC):
-    """"""
+class ActionInjector(nn.Module, ABC):
+    """Base class for action condition injectors."""
     @abstractmethod
     def forward(
         self,
         x: torch.Tensor,
         condition: Optional[torch.Tensor],
-        freqs_cis: Tuple[torch.Tensor, torch.Tensor],
         spatial_shape: Tuple[int, int],
         temporal_shape: int,
         is_causal: bool = False,
-        kv_cache: Optional[Dict[str, torch.Tensor]] = None,
+        kv_cache=None,
         start_frame: int = 0,
         num_frame_per_block: int = 1,
-        block_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         pass
-    
-class KVCacheManager(nn.Module):
-    """Manages KV cache with sliding window and optional sink tokens"""
-    def __init__(self, local_attn_size: int, sink_size: int = 0):
-        super().__init__()
-        self.max_attention_size = local_attn_size
-        self.sink_tokens = sink_size
-
-    def update_cache(
-        self,
-        kv_cache: Dict[str, torch.Tensor],
-        k: torch.Tensor,
-        v: torch.Tensor,
-        num_new_tokens: int
-    ) -> Tuple[torch.Tensor, torch.Tensor, int, int]:
-        """
-        Update KV cache with new key-value pairs using sliding window strategy.
-
-        OPTIMIZED: Uses update_kv_cache_optimized() to minimize D2H transfers.
-
-        Args:
-            kv_cache: Dictionary containing 'k', 'v', 'global_end_index', 'local_end_index'
-            k: New keys [BS, num_new_tokens, num_heads, head_dim]
-            v: New values [BS, num_new_tokens, num_heads, head_dim]
-            num_new_tokens: Number of new tokens to add
-
-        Returns:
-            k_window: Keys in attention window [BS, window_len, num_heads, head_dim]
-            v_window: Values in attention window [BS, window_len, num_heads, head_dim]
-            local_start_index: Start index in cache
-            local_end_index: End index in cache
-        """
-        return update_kv_cache_optimized(
-            kv_cache=kv_cache,
-            k=k,
-            v=v,
-            num_new_tokens=num_new_tokens,
-            max_attention_size=self.max_attention_size,
-            sink_tokens=self.sink_tokens,
-        )
 
 
-class IAttentionCore(nn.Module, ABC):
-    """Abstract base class for attention computation"""
 
-    @abstractmethod
-    def forward(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        causal: bool = False,
-        use_rope: bool = False,
-    ) -> torch.Tensor:
-        """
-        Compute attention output.
-
-        Args:
-            q: Query tensor [BS, seq_len_q, num_heads, head_dim]
-            k: Key tensor [BS, seq_len_k, num_heads, head_dim]
-            v: Value tensor [BS, seq_len_k, num_heads, head_dim]
-            causal: Whether to apply causal masking
-            use_rope: Whether to apply RoPE on-the-fly
-
-        Returns:
-            Attention output [BS, seq_len_q, num_heads, head_dim]
-        """
-        pass
-
-
-class WanRMSNorm(nn.Module):
-    """Root Mean Square Layer Normalization"""
-
-    def __init__(self, dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            x: [..., dim] tensor
-        Returns:
-            Normalized tensor with same shape as input
-        """
-        return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps) * self.weight
-
-
-class FlashInferAttentionCore(IAttentionCore):
+class AttentionKernel(nn.Module):
     """
     FlashInfer-based attention implementation with integrated RoPE support.
 
@@ -176,9 +68,6 @@ class FlashInferAttentionCore(IAttentionCore):
         Returns:
             Tuple of rotated (q, k) tensors with same shapes
         """
-        if not FLASHINFER_AVAILABLE:
-            raise RuntimeError("flashinfer is not available. Please install it first.")
-
         BS_q, seq_len_q, num_heads, head_dim = q.shape
         BS_k, seq_len_k, _, _ = k.shape
 
@@ -230,9 +119,6 @@ class FlashInferAttentionCore(IAttentionCore):
         Returns:
             Rotated tensor with same shape
         """
-        if not FLASHINFER_AVAILABLE:
-            raise RuntimeError("flashinfer is not available. Please install it first.")
-
         BS, seq_len, num_heads, head_dim = x.shape
 
         # Flatten to ragged format: [BS, L, H, D] -> [BS*L, H, D]
@@ -270,9 +156,10 @@ class FlashInferAttentionCore(IAttentionCore):
         causal: bool = False,
         use_rope: bool = False,
         rope_offset: Optional[int] = None,
+        kv_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Compute attention using FlashInfer with optional integrated RoPE.
+        Compute attention using FlashInfer with optional integrated RoPE and KV masking.
 
         Args:
             q: [BS, seq_len_q, num_heads, head_dim] - Query tensor
@@ -281,15 +168,29 @@ class FlashInferAttentionCore(IAttentionCore):
             causal: Whether to apply causal masking
             use_rope: If True, apply RoPE internally using flashinfer (more efficient)
             rope_offset: Position offset for RoPE (only used when use_rope=True)
+            kv_mask: Optional [seq_len_k] boolean mask for KV pairs (True = valid, False = padding)
+                     Used for handling variable-length sequences with fixed-shape tensors
 
         Returns:
             Attention output [BS, seq_len_q, num_heads, head_dim]
         """
-        if not FLASHINFER_AVAILABLE:
-            raise RuntimeError("flashinfer is not available. Please install it first.")
-
         BS, seq_len_q, num_heads, head_dim = q.shape
         _, seq_len_kv, _, _ = k.shape
+
+        # Handle KV masking for variable-length sequences
+        # During cache warmup (prefill), kv_mask may have False values (padding)
+        # During steady-state decode with CUDA Graph, kv_mask should be all-True
+        if kv_mask is not None and not kv_mask.all():
+            # Mask has padding - compute valid length and slice
+            # WARNING: This path is NOT CUDA Graph compatible (dynamic slicing)
+            # Only use this during warmup/prefill, not during Graph capture
+            valid_kv_len_tensor = kv_mask.sum(dtype=torch.long)
+            valid_kv_len = int(valid_kv_len_tensor.item())
+
+            # Truncate k/v to valid length
+            k = k[:, :valid_kv_len]
+            v = v[:, :valid_kv_len]
+            seq_len_kv = valid_kv_len
 
         if BS == 1:
             # Single sequence - use single_prefill_with_kv_cache
