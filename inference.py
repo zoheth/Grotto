@@ -10,7 +10,7 @@ from diffusers.utils.export_utils import export_to_video
 from diffusers.utils.loading_utils import load_image
 
 from grotto.misc import set_seed
-from grotto.generator import VideoGenerator
+from grotto.generator import VideoGenerator, VAECompileMode
 
 def process_video(input_video, output_video):
     fps = 12
@@ -52,8 +52,12 @@ def main(
         help="Path to the VAE model folder"
     ),
     enable_profile: bool = typer.Option(
-        False, 
+        False,
         help="Enable torch profiling",
+    ),
+    vae_compile_mode: VAECompileMode = typer.Option(
+        VAECompileMode.NONE,
+        help="VAE decoder compile mode: auto (use cache if available), force (recompile), none (no compile)"
     ),
 
 ):
@@ -61,7 +65,7 @@ def main(
     os.makedirs(output_folder, exist_ok=True)
 
 
-    generator = VideoGenerator(config_path, checkpoint_path, pretrained_model_path)
+    generator = VideoGenerator(config_path, checkpoint_path, pretrained_model_path, vae_compile_mode=vae_compile_mode)
 
     image = load_image(str(img_path))
     video = generator.generate(image, num_output_frames)

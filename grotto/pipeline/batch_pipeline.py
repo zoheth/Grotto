@@ -132,6 +132,9 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
         Returns:
             Tuple of (decoded video, updated cache)
         """
+        # Mark CUDA graph step boundary to prevent tensor overwriting
+        torch.compiler.cudagraph_mark_step_begin()
+
         # Transpose for VAE decoder: [batch, frames, channels, h, w]
         latent = latent.transpose(1, 2)
         video, vae_cache = self.vae_decoder(latent.half(), *vae_cache)

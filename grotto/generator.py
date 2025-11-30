@@ -25,12 +25,12 @@ class VAECompileMode(str, Enum):
     NONE = "none"
 
 class VideoGenerator:
-    def __init__(self, config_path, checkpoint_path, vae_dir, device="cuda"):
+    def __init__(self, config_path, checkpoint_path, vae_dir, device="cuda", vae_compile_mode: VAECompileMode = VAECompileMode.AUTO):
         self.device = torch.device("cuda")
         self.weight_dtype = torch.bfloat16
         self.config:PipelineConfig = PipelineConfig.load(config_path)
 
-        self._init_models(checkpoint_path, vae_dir)
+        self._init_models(checkpoint_path, vae_dir, vae_compile_mode)
 
         self.frame_process = v2.Compose([
             v2.Resize(size=(352, 640), antialias=True),
@@ -38,7 +38,7 @@ class VideoGenerator:
             v2.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
         ])
 
-    def _init_models(self, checkpoint_path, vae_dir):
+    def _init_models(self, checkpoint_path, vae_dir, vae_compile_mode: VAECompileMode = VAECompileMode.AUTO):
         predictor = WanDiffusionPredictor(
             num_frame_per_block=self.config.inference.num_frame_per_block,
             model_config_path=self.config.model_config_path,
@@ -55,7 +55,7 @@ class VideoGenerator:
         # Use strict=False to allow missing buffers that are auto-initialized (e.g., freqs)
         predictor.load_state_dict(state_dict, strict=False)
 
-        vae_decoder = self._load_vae_decoder(vae_dir)
+        vae_decoder = self._load_vae_decoder(vae_dir, vae_compile_mode)
 
         self.pipeline = BatchCausalInferencePipeline(
             config=self.config,
