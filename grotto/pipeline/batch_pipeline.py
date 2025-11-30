@@ -59,7 +59,7 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
                 dtype=torch.int64
             ) * current_timestep
 
-            flow_pred, _ = self.predictor(
+            flow_pred = self.predictor(
                 noisy_image_or_video=noisy_input,
                 conditional_dict=conditional_dict,
                 timestep=timestep,
@@ -137,6 +137,7 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
         video, vae_cache = self.vae_decoder(latent.half(), *vae_cache)
         return video, vae_cache
 
+    @torch.no_grad()
     def inference(
         self,
         noise: torch.Tensor,

@@ -24,7 +24,7 @@ class WanDiffusionPredictor(nn.Module):
 
         self.num_frame_per_block = num_frame_per_block
 
-        self.model_config, _ = CausalWanModel.load_config(model_config_path)
+        self.model_config = CausalWanModel.load_config(model_config_path)
         self.model= typing.cast(CausalWanModel, CausalWanModel.from_config(self.model_config))
         self.model.eval()
 
@@ -66,6 +66,7 @@ class WanDiffusionPredictor(nn.Module):
             noisy_image_or_video.to(self.model.dtype),
             timesteps = input_timestep,
             visual_context = conditional_dict.get('visual_context'),
+            cond_concat = conditional_dict.get('cond_concat'),
             action_context = action_context,
             kv_cache = kv_cache,
             kv_cache_mouse = kv_cache_mouse,

@@ -12,6 +12,11 @@ from torchvision.transforms import v2
 from grotto.modeling.predictor import WanDiffusionPredictor
 from grotto.pipeline import PipelineConfig, BatchCausalInferencePipeline
 from grotto.modeling.vae_wrapper import VaeDecoderWrapper, create_wan_encoder
+from grotto.modeling.weight_mapping_config import (
+    apply_mapping,
+    detect_old_predictor_format,
+    PREDICTOR_IMG_EMB_MAPPING
+)
 from grotto.conditions import Bench_actions_universal
 
 class VAECompileMode(str, Enum):
@@ -41,7 +46,14 @@ class VideoGenerator:
         )
 
         state_dict = load_file(checkpoint_path)
-        predictor.load_state_dict(state_dict)
+
+        # Apply weight mapping if needed for old checkpoint format
+        if detect_old_predictor_format(state_dict):
+            logging.info("Detected old checkpoint format, applying weight mapping...")
+            state_dict = apply_mapping(state_dict, PREDICTOR_IMG_EMB_MAPPING)
+
+        # Use strict=False to allow missing buffers that are auto-initialized (e.g., freqs)
+        predictor.load_state_dict(state_dict, strict=False)
 
         vae_decoder = self._load_vae_decoder(vae_dir)
 
@@ -64,7 +76,7 @@ class VideoGenerator:
         vae_decoder = VaeDecoderWrapper()
 
         compiled_model_path = os.path.join(vae_dir, "compiled_vae_decoder.pt")
-        vae_state_dict = torch.load(os.path.join(vae_dir, "Wan2.1_VAE.pth"), map_location="cpu")
+        vae_state_dict = torch.load(os.path.join(vae_dir, "Wan2.1_VAE.pth"), map_location="cpu", weights_only=False)
         decoder_state_dict = {}
         for key, value in vae_state_dict.items():
             if 'decoder.' in key or 'conv2' in key:
@@ -79,16 +91,16 @@ class VideoGenerator:
             logging.info("VAE decoder compilation skipped as per user request.")
         elif compile_mode == VAECompileMode.FORCE:
             logging.info("Forcing VAE decoder compilation...")
-            vae_decoder = torch.compile(vae_decoder, mode="max-autotune")
+            vae_decoder = torch.compile(vae_decoder, mode="max-autotune-no-cudagraphs")
             torch.save(vae_decoder, compiled_model_path)
             logging.info(f"Compiled VAE decoder saved to {compiled_model_path}")
         elif compile_mode == VAECompileMode.AUTO:
             if os.path.exists(compiled_model_path):
                 logging.info(f"Loading compiled VAE decoder from {compiled_model_path}...")
-                vae_decoder = torch.load(compiled_model_path, map_location=self.device)
+                vae_decoder = torch.load(compiled_model_path, map_location=self.device, weights_only=False)
             else:
                 logging.info("Compiling VAE decoder...")
-                vae_decoder = torch.compile(vae_decoder, mode="max-autotune")
+                vae_decoder = torch.compile(vae_decoder, mode="max-autotune-no-cudagraphs")
                 torch.save(vae_decoder, compiled_model_path)
                 logging.info(f"Compiled VAE decoder saved to {compiled_model_path}")
 
@@ -109,6 +121,7 @@ class VideoGenerator:
         image = image.crop((left, top, right, bottom))
         return image
 
+    @torch.no_grad()
     def generate(self, image:PIL.Image.Image, num_frames=150, seed=0):
         image = self._resizecrop(image, 352, 640)
         image_tensor = self.frame_process(image)[None, :, None, :, :].to(dtype=self.weight_dtype, device=self.device)
@@ -122,7 +135,7 @@ class VideoGenerator:
         mask_cond[:, :, 1:] = 0
         cond_concat = torch.cat([mask_cond[:, :4], img_cond], dim=1)
 
-        visual_context = self.vae_encoder.clip.encode_video(image)
+        visual_context = self.vae_encoder.clip.encode_video(image_tensor)
 
         sampled_noise = torch.randn(
             [1, 16, num_frames, 44, 80], device=self.device, dtype=self.weight_dtype

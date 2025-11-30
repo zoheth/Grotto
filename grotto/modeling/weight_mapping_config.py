@@ -96,3 +96,21 @@ def apply_mapping(state_dict, mapping_table):
 def detect_old_vae_format(state_dict):
     """Check if state_dict is from old VAEDecoderWrapper"""
     return any('.residual.' in key for key in state_dict.keys())
+
+
+# Predictor/Model weight mapping for img_emb
+PREDICTOR_IMG_EMB_MAPPING = {
+    'model.img_emb.proj.0.weight': ('model.img_emb.0.weight', None),
+    'model.img_emb.proj.0.bias': ('model.img_emb.0.bias', None),
+    'model.img_emb.proj.1.weight': ('model.img_emb.1.weight', None),
+    'model.img_emb.proj.1.bias': ('model.img_emb.1.bias', None),
+    'model.img_emb.proj.3.weight': ('model.img_emb.3.weight', None),
+    'model.img_emb.proj.3.bias': ('model.img_emb.3.bias', None),
+    'model.img_emb.proj.4.weight': ('model.img_emb.4.weight', None),
+    'model.img_emb.proj.4.bias': ('model.img_emb.4.bias', None),
+}
+
+
+def detect_old_predictor_format(state_dict):
+    """Check if state_dict has old img_emb.proj format"""
+    return any('model.img_emb.proj.' in key for key in state_dict.keys())

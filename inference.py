@@ -1,5 +1,6 @@
-import argparse
 import os
+os.environ["PYTHONBREAKPOINT"] = "0"
+os.environ["_TYPER_STANDARD_TRACEBACK"] = "1" 
 import numpy as np
 
 import typer

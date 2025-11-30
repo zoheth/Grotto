@@ -356,6 +356,7 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
         x: torch.Tensor,
         timesteps: torch.Tensor,
         visual_context,
+        cond_concat,
         kv_cache: List[PagedCache],
         action_context: Optional[ActionContext] = None,
         kv_cache_mouse: Optional[List["RingBufferActionCache"]] = None,
@@ -366,24 +367,19 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
         if self.freqs.device != device:
             self.freqs = self.freqs.to(device)
 
-        _, C_in, F, H, W = x.shape
-        num_frames = F
-        frame_seqlen = H * W // (self.patch_size[1] * self.patch_size[2])
+        x = torch.cat([x, cond_concat], dim=1) # B C' F H W
 
         x = self.patch_embedding(x)
         grid_sizes = tuple(x.shape[2:])
         x = rearrange(x, 'b c f h w -> b (f h w) c')
         assert x.shape[1] <= 15 * 1 * 880
-        
-        timesteps = timesteps.flatten()
-        e_raw = self.pos_encoder(timesteps)
+
+        e_raw = self.pos_encoder(timesteps.flatten())
         e:torch.Tensor = self.time_embedding(e_raw.type_as(x))
-        
+
         e_proj = self.time_projection(e) # Output: [Total_Batch, 6 * dim]
 
-        e0 = rearrange(e_proj, 'b (chunks d) -> b chunks d', chunks=6)
-
-        e0 = e0.view(*timesteps.shape, 6, -1)
+        e0 = e_proj.unflatten(1, (6, self.dim)).unflatten(dim=0, sizes=timesteps.shape)
 
         context = self.img_emb(visual_context)
 

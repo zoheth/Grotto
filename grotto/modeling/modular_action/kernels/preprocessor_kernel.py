@@ -147,7 +147,7 @@ def mouse_preprocessor_triton(
     """
     # Ensure tensors are contiguous for correct stride calculation in Triton
     if not hidden_states.is_contiguous():
-        print(f"[DEBUG] Making hidden_states contiguous...")
+        # print(f"[DEBUG] Making hidden_states contiguous...")
         hidden_states = hidden_states.contiguous()
     if not mouse_condition.is_contiguous():
         print(f"[DEBUG] Making mouse_condition contiguous...")

@@ -1,4 +1,4 @@
-denoising_step_list:
+denoising_steps:
 - 1000
 - 666
 - 333
