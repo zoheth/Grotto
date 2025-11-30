@@ -6,10 +6,10 @@ import copy
 from einops import rearrange
 from tqdm import tqdm
 
-from .config import PipelineConfig
-from .condition_processor import ConditionProcessor
-from ..models.predictor import WanDiffusionPredictor
-from ..scheduler import FlowMatchScheduler
+from grotto.pipeline.config import PipelineConfig
+from grotto.pipeline.condition_processor import ConditionProcessor
+from grotto.modeling.predictor import WanDiffusionPredictor
+from grotto.scheduler import FlowMatchScheduler
 
 class BaseCausalInferencePipeline(torch.nn.Module, ABC):
     """

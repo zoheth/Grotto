@@ -9,11 +9,10 @@ from einops import rearrange
 from omegaconf import OmegaConf
 from safetensors.torch import load_file
 from torchvision.transforms import v2
-from .models.predictor import WanDiffusionPredictor
-from .pipeline import PipelineConfig, BatchCausalInferencePipeline
-from .models.vae_wrapper import VaeDecoderWrapper
-from .models.vae_wrapper import create_wan_encoder
-from .conditions import Bench_actions_universal
+from grotto.modeling.predictor import WanDiffusionPredictor
+from grotto.pipeline import PipelineConfig, BatchCausalInferencePipeline
+from grotto.modeling.vae_wrapper import VaeDecoderWrapper, create_wan_encoder
+from grotto.conditions import Bench_actions_universal
 
 class VAECompileMode(str, Enum):
     AUTO = "auto"
@@ -95,7 +94,7 @@ class VideoGenerator:
 
         return vae_decoder
     
-    def _resizecrop(self, image:PIL.Image.Image,, th, tw):
+    def _resizecrop(self, image:PIL.Image.Image, th, tw):
         w, h = image.size
         if h / w > th / tw:
             new_w = int(w)

@@ -5,10 +5,10 @@ import torch
 from einops import rearrange
 from tqdm import tqdm
 
-from .base_pipeline import BaseCausalInferencePipeline
-from .config import PipelineConfig
-from .cache_manager import CacheManager
-from ..models.constant import ZERO_VAE_CACHE
+from grotto.pipeline.base_pipeline import BaseCausalInferencePipeline
+from grotto.pipeline.config import PipelineConfig
+from grotto.pipeline.cache_manager import CacheManager
+from grotto.modeling.constant import ZERO_VAE_CACHE
 
 class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
 

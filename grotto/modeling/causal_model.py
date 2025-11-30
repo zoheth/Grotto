@@ -10,12 +10,11 @@ from diffusers.models.modeling_utils import ModelMixin
 from diffusers.loaders.single_file_model import FromOriginalModelMixin
 from diffusers.loaders.peft import PeftAdapterMixin
 
-from .modular_action.action_module import ActionModule
-from .cross_attention import I2VCrossAttention
-from .causal_self_attention import CausalSelfAttention, FlashInferPlanner
-from .paged_cache import PagedCache
-
-from .modular_action import ActionModule, ActionConfig, ActionContext
+from grotto.modeling.modular_action.action_module import ActionModule
+from grotto.modeling.cross_attention import I2VCrossAttention
+from grotto.modeling.causal_self_attention import CausalSelfAttention, FlashInferPlanner
+from grotto.modeling.paged_cache import PagedCache
+from grotto.modeling.modular_action import ActionModule, ActionConfig, ActionContext
 
 if TYPE_CHECKING:
     from .ring_buffer_cache import RingBufferActionCache

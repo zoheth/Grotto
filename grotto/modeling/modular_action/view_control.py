@@ -15,9 +15,9 @@ import torch
 from torch import nn
 from einops import rearrange
 
-from .interfaces import ActionInjector, AttentionKernel
-from .action_config import ActionConfig
-from .kernels.preprocessor_kernel import mouse_preprocessor_triton
+from grotto.modeling.modular_action.interfaces import ActionInjector, AttentionKernel
+from grotto.modeling.modular_action.action_config import ActionConfig
+from grotto.modeling.modular_action.kernels.preprocessor_kernel import mouse_preprocessor_triton
 
 if TYPE_CHECKING:
     from ..ring_buffer_cache import RingBufferActionCache

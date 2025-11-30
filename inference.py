@@ -8,8 +8,8 @@ from enum import Enum
 from diffusers.utils.export_utils import export_to_video
 from diffusers.utils.loading_utils import load_image
 
-from misc import set_seed
-from .generator import VideoGenerator
+from grotto.misc import set_seed
+from grotto.generator import VideoGenerator
 
 def process_video(input_video, output_video):
     fps = 12
@@ -62,7 +62,7 @@ def main(
 
     generator = VideoGenerator(config_path, checkpoint_path, pretrained_model_path)
 
-    image = load_image(img_path._str)
+    image = load_image(str(img_path))
     video = generator.generate(image, num_output_frames)
 
     process_video(video.astype(np.uint8), output_folder/'demo.mp4')

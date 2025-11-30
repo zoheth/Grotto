@@ -6,22 +6,17 @@ Terminology:
     - Movement: Character movement (input: keyboard WASD, gamepad left stick)
 """
 
-from .action_config import (
-    ActionConfig
-)
-
-from .action_module import ActionModule, ActionContext
-
-from .view_control import (
+from grotto.modeling.modular_action.action_config import ActionConfig
+from grotto.modeling.modular_action.action_module import ActionModule, ActionContext
+from grotto.modeling.modular_action.view_control import (
     ViewControlInjector,
     ViewControlPreprocessor,
 )
-from .movement_control import (
+from grotto.modeling.modular_action.movement_control import (
     MovementInjector,
     MovementPreprocessor,
 )
-
-from .interfaces import (
+from grotto.modeling.modular_action.interfaces import (
     ActionInjector,
     AttentionKernel
 )

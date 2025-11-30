@@ -1,9 +1,9 @@
 from typing import List, Dict, Optional
 import torch
 
-from .config import ModelConfig, CacheConfig
-from ..models.paged_cache import PagedCache
-from ..models.ring_buffer_cache import RingBufferActionCache
+from grotto.pipeline.config import ModelConfig, CacheConfig
+from grotto.modeling.paged_cache import PagedCache
+from grotto.modeling.ring_buffer_cache import RingBufferActionCache
 
 class CacheManager:
 

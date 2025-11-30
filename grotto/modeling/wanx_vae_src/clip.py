@@ -9,9 +9,9 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 from diffusers.models import ModelMixin
 
-from .attention import flash_attention
-from .tokenizers import HuggingfaceTokenizer
-from .xlm_roberta import XLMRoberta
+from grotto.modeling.wanx_vae_src.attention import flash_attention
+from grotto.modeling.wanx_vae_src.tokenizers import HuggingfaceTokenizer
+from grotto.modeling.wanx_vae_src.xlm_roberta import XLMRoberta
 
 __all__ = [
     'XLMRobertaCLIP',

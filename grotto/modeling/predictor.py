@@ -6,9 +6,9 @@ import torch
 from torch import nn
 from torch.nn.attention.flex_attention import BlockMask
 
-from .causal_model import CausalWanModel
-from ..scheduler import FlowMatchScheduler
-from .modular_action import ActionContext
+from grotto.modeling.causal_model import CausalWanModel
+from grotto.scheduler import FlowMatchScheduler
+from grotto.modeling.modular_action import ActionContext
 
 if TYPE_CHECKING:
     from .paged_cache import PagedCache

@@ -3,9 +3,9 @@ from typing import List, Tuple, Optional
 import torch
 from torch import nn
 
-from .vae import VaeDecoder3d, CacheState, CausalConv3d
-from .weight_mapping_config import apply_mapping, detect_old_vae_format, VAE_DECODER_MAPPING
-from .wanx_vae_src import WanVAE, CLIPModel
+from grotto.modeling.vae import VaeDecoder3d, CacheState, CausalConv3d
+from grotto.modeling.weight_mapping_config import apply_mapping, detect_old_vae_format, VAE_DECODER_MAPPING
+from grotto.modeling.wanx_vae_src import WanVAE, CLIPModel
 
 class VaeDecoderWrapper(nn.Module):
     """Wrapper for new VaeDecoder3d to match the interface expected by inference pipeline"""

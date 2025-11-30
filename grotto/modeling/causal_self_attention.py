@@ -12,7 +12,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 from flashinfer import BatchPrefillWithPagedKVCacheWrapper
-from .paged_cache import PagedCache
+from grotto.modeling.paged_cache import PagedCache
 
 
 class RoPE3DCache:

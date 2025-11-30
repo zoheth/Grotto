@@ -7,9 +7,9 @@ from typing import Dict, Optional, TYPE_CHECKING
 import torch
 from torch import nn
 
-from .action_config import ActionConfig
-from .view_control import ViewControlInjector
-from .movement_control import MovementInjector
+from grotto.modeling.modular_action.action_config import ActionConfig
+from grotto.modeling.modular_action.view_control import ViewControlInjector
+from grotto.modeling.modular_action.movement_control import MovementInjector
 
 if TYPE_CHECKING:
     from ..ring_buffer_cache import RingBufferActionCache

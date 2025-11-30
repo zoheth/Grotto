@@ -8,8 +8,8 @@ This module handles the preparation and slicing of conditional inputs
 from typing import Dict, Optional
 import torch
 
-from .config import VAEConfig
-from .action_strategies import ActionDict
+from grotto.pipeline.config import VAEConfig
+from grotto.pipeline.action_strategies import ActionDict
 
 class ConditionProcessor:
     """
