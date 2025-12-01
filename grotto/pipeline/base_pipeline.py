@@ -50,7 +50,7 @@ class BaseCausalInferencePipeline(torch.nn.Module, ABC):
 
         self.cache_manager = None
 
-        self.condition_processor = ConditionProcessor(vae_config=config.vae, mode=config.mode)
+        self.condition_processor = ConditionProcessor(vae_config=config.vae)
         print(
             f"Initialized {self.__class__.__name__} with {config.inference.num_frame_per_block} frames per block"
         )

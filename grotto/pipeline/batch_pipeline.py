@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import List
 
 import torch
 from einops import rearrange
@@ -8,6 +8,7 @@ from grotto.modeling.constant import ZERO_VAE_CACHE
 from grotto.pipeline.base_pipeline import BaseCausalInferencePipeline
 from grotto.pipeline.cache_manager import CacheManager
 from grotto.pipeline.config import PipelineConfig
+from grotto.types import ConditionalInputs
 
 
 class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
@@ -40,7 +41,7 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
     def _denoise_block(
         self,
         noisy_input: torch.Tensor,
-        conditional_dict: Dict[str, torch.Tensor],
+        conditional_inputs: ConditionalInputs,
         current_start_frame: int,
         batch_size: int,
     ) -> torch.Tensor:
@@ -56,7 +57,7 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
 
             flow_pred = self.predictor(
                 noisy_image_or_video=noisy_input,
-                conditional_dict=conditional_dict,
+                conditional_inputs=conditional_inputs,
                 timestep=timestep,
                 kv_cache=visual_cache,
                 kv_cache_mouse=mouse_cache,
@@ -88,7 +89,7 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
     def _update_kv_cache_with_clean_context(
         self,
         denoised_pred: torch.Tensor,
-        conditional_dict: Dict[str, torch.Tensor],
+        conditional_inputs: ConditionalInputs,
         current_start_frame: int,
         batch_size: int,
     ) -> None:
@@ -102,7 +103,7 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
 
         self.predictor(
             noisy_image_or_video=denoised_pred,
-            conditional_dict=conditional_dict,
+            conditional_inputs=conditional_inputs,
             timestep=context_timestep,
             kv_cache=visual_cache,
             kv_cache_mouse=mouse_cache,
@@ -135,7 +136,7 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
     def inference(
         self,
         noise: torch.Tensor,
-        conditional_dict: Dict[str, torch.Tensor],
+        conditional_inputs: ConditionalInputs,
         return_latents: bool = False,
         profile: bool = False,
     ) -> torch.Tensor | List[torch.Tensor]:
@@ -168,7 +169,7 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
             ]
 
             block_cond, _ = self.condition_processor.slice_block_conditions(
-                conditional_dict, current_start_frame, current_num_frames
+                conditional_inputs, current_start_frame, current_num_frames
             )
 
             denoised_pred = self._denoise_block(

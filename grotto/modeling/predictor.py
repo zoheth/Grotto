@@ -6,6 +6,7 @@ from torch import nn
 
 from grotto.modeling.causal_model import CausalWanModel
 from grotto.modeling.modular_action import ActionContext
+from grotto.types import ConditionalInputs
 
 if TYPE_CHECKING:
     from .paged_cache import PagedCache
@@ -36,7 +37,7 @@ class WanDiffusionPredictor(nn.Module):
     def forward(
         self,
         noisy_image_or_video: torch.Tensor,
-        conditional_dict: dict,
+        conditional_inputs: ConditionalInputs,
         timestep: torch.Tensor,
         kv_cache: List["PagedCache"],
         kv_cache_mouse: Optional[List["RingBufferActionCache"]] = None,
@@ -45,28 +46,28 @@ class WanDiffusionPredictor(nn.Module):
         cache_start: Optional[int] = None,
     ) -> torch.Tensor:
         assert noisy_image_or_video.shape[1] == 16
-        # [B, F] -> [B]
+
         if self.uniform_timestep:
             input_timestep = timestep[:, 0]
         else:
             input_timestep = timestep
 
-        rotation_cond = conditional_dict.get("rotation_cond")
-        translation_cond = conditional_dict.get("translation_cond")
-
         action_context = None
-        if rotation_cond is not None or translation_cond is not None:
+        if (
+            conditional_inputs.rotation_cond is not None
+            or conditional_inputs.translation_cond is not None
+        ):
             action_context = ActionContext(
-                rotation_cond=rotation_cond,
-                translation_cond=translation_cond,
+                rotation_cond=conditional_inputs.rotation_cond,
+                translation_cond=conditional_inputs.translation_cond,
                 num_frame_per_block=self.num_frame_per_block,
             )
 
         flow_pred = self.model(
             noisy_image_or_video.to(self.model.dtype),
             timesteps=input_timestep,
-            visual_context=conditional_dict.get("visual_context"),
-            cond_concat=conditional_dict.get("cond_concat"),
+            visual_context=conditional_inputs.visual_context,
+            cond_concat=conditional_inputs.cond_concat,
             action_context=action_context,
             kv_cache=kv_cache,
             kv_cache_mouse=kv_cache_mouse,

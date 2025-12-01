@@ -18,6 +18,7 @@ from grotto.modeling.weight_mapping_config import (
     detect_old_predictor_format,
 )
 from grotto.pipeline import BatchCausalInferencePipeline, PipelineConfig
+from grotto.types import ConditionalInputs
 
 
 class VAECompileMode(str, Enum):
@@ -157,26 +158,18 @@ class VideoGenerator:
 
         num_video_frames = (num_frames - 1) * 4 + 1
 
-        conditional_dict = {
-            "cond_concat": cond_concat.to(device=self.device, dtype=self.weight_dtype),
-            "visual_context": visual_context.to(device=self.device, dtype=self.weight_dtype),
-        }
-
         camera_control = generate_camera_navigation(num_video_frames)
-        translation_cond = (
-            camera_control["translation"]
-            .unsqueeze(0)
-            .to(device=self.device, dtype=self.weight_dtype)
-        )
-        conditional_dict["translation_cond"] = translation_cond
-        rotation_cond = (
-            camera_control["rotation"].unsqueeze(0).to(device=self.device, dtype=self.weight_dtype)
-        )
-        conditional_dict["rotation_cond"] = rotation_cond
+
+        conditional_inputs = ConditionalInputs(
+            cond_concat=cond_concat,
+            visual_context=visual_context,
+            rotation_cond=camera_control["rotation"].unsqueeze(0),
+            translation_cond=camera_control["translation"].unsqueeze(0),
+        ).to(device=self.device, dtype=self.weight_dtype)
 
         videos = self.pipeline.inference(
             noise=sampled_noise,
-            conditional_dict=conditional_dict,
+            conditional_inputs=conditional_inputs,
             return_latents=False,
         )
 
