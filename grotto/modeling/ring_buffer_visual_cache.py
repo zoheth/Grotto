@@ -27,7 +27,6 @@ class RingBufferVisualCache:
 
         self.write_pos = torch.zeros(1, dtype=torch.long, device=device)
         self.valid_len = torch.zeros(1, dtype=torch.long, device=device)
-        self.global_end_index = torch.zeros(1, dtype=torch.long, device=device)
 
         self._arange = torch.arange(max_seq_len, device=device, dtype=torch.long)
         self._max_seq_len_tensor = torch.tensor([max_seq_len], dtype=torch.long, device=device)
@@ -36,21 +35,28 @@ class RingBufferVisualCache:
     def reset(self):
         self.write_pos.zero_()
         self.valid_len.zero_()
-        self.global_end_index.zero_()
 
-    def update_or_append(self, k: torch.Tensor, v: torch.Tensor, current_end: int) -> None:
+    def read(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Read current valid K/V from cache.
+
+        Returns:
+            (k, v): Tensors of shape (valid_len, num_heads, head_dim)
+        """
+        return self.get_kv_cache()
+
+    def append(self, k: torch.Tensor, v: torch.Tensor) -> None:
+        """
+        Append new K/V to cache (always moves forward).
+
+        Args:
+            k: Keys of shape (incoming_len, num_heads, head_dim)
+            v: Values of shape (incoming_len, num_heads, head_dim)
+        """
         incoming_len = k.shape[0]
-        current_end_tensor = torch.tensor([current_end], dtype=torch.long, device=self.device)
-        is_overwrite = current_end_tensor <= self.global_end_index
-
-        if is_overwrite.item():
-            write_start_pos = torch.maximum(self._zero, self.write_pos - incoming_len)
-            self._write_with_wrap(k, v, write_start_pos, incoming_len)
-        else:
-            self._write_with_wrap(k, v, self.write_pos, incoming_len)
-            self.write_pos.add_(incoming_len).fmod_(self.max_seq_len)
-            self.valid_len.add_(incoming_len).clamp_(max=self.max_seq_len)
-            self.global_end_index.copy_(current_end_tensor)
+        self._write_with_wrap(k, v, self.write_pos, incoming_len)
+        self.write_pos.add_(incoming_len).fmod_(self.max_seq_len)
+        self.valid_len.add_(incoming_len).clamp_(max=self.max_seq_len)
 
     def _write_with_wrap(
         self, k: torch.Tensor, v: torch.Tensor, start_offset: torch.Tensor, incoming_len: int

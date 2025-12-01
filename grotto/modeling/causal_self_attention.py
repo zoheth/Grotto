@@ -105,6 +105,7 @@ class CausalSelfAttention(nn.Module):
         freqs: torch.Tensor,
         kv_cache: RingBufferVisualCache,
         current_start: int,
+        cache_mode: str = "read_write",
     ) -> torch.Tensor:
         B, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
         assert B == 1, "RingBufferVisualCache only supports batch size 1"
@@ -139,24 +140,48 @@ class CausalSelfAttention(nn.Module):
         v_squeezed = v.squeeze(0).contiguous()
         current_end = current_start + roped_k_squeezed.shape[0]
 
-        kv_cache.update_or_append(roped_k_squeezed, v_squeezed, current_end)
-        block_size = self.num_frame_per_block * frame_seqlen
-        if self.local_attn_size == -1:
-            keep_size = 15 * frame_seqlen
+        if cache_mode == "read_only":
+            # Denoising phase: read historical cache and concat with current K/V
+            k_history, v_history = kv_cache.read()
+            if k_history.shape[0] > 0:
+                k_full = torch.cat([k_history, roped_k_squeezed], dim=0)
+                v_full = torch.cat([v_history, v_squeezed], dim=0)
+            else:
+                k_full = roped_k_squeezed
+                v_full = v_squeezed
+
+            q_for_flash = roped_q.squeeze(0)
+            x = flashinfer.single_prefill_with_kv_cache(
+                q_for_flash, k_full, v_full, causal=False, kv_layout="NHD"
+            )
+            x = x.unsqueeze(0)
+
+        elif cache_mode == "read_write":
+            # Caching phase: append clean K/V to cache
+            kv_cache.append(roped_k_squeezed, v_squeezed)
+
+            block_size = self.num_frame_per_block * frame_seqlen
+            if self.local_attn_size == -1:
+                keep_size = 15 * frame_seqlen
+            else:
+                current_block_idx = current_start // block_size
+                current_block_end = (current_block_idx + 1) * block_size
+                keep_from_position = max(0, current_block_end - self.local_attn_size * frame_seqlen)
+                keep_size = current_end - keep_from_position
+
+            kv_cache.evict(keep_size)
+            k_cache, v_cache = kv_cache.read()
+
+            q_for_flash = roped_q.squeeze(0)
+            x = flashinfer.single_prefill_with_kv_cache(
+                q_for_flash, k_cache, v_cache, causal=False, kv_layout="NHD"
+            )
+            x = x.unsqueeze(0)
+
         else:
-            current_block_idx = current_start // block_size
-            current_block_end = (current_block_idx + 1) * block_size
-            keep_from_position = max(0, current_block_end - self.local_attn_size * frame_seqlen)
-            keep_size = current_end - keep_from_position
-
-        kv_cache.evict(keep_size)
-        k_cache, v_cache = kv_cache.get_kv_cache()
-
-        q_for_flash = roped_q.squeeze(0)
-        x = flashinfer.single_prefill_with_kv_cache(
-            q_for_flash, k_cache, v_cache, causal=False, kv_layout="NHD"
-        )
-        x = x.unsqueeze(0)
+            raise ValueError(
+                f"Invalid cache_mode: {cache_mode}. Must be 'read_only' or 'read_write'"
+            )
 
         x = x.flatten(2)
         x = self.o(x)

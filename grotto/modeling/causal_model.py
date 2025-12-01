@@ -104,6 +104,7 @@ class CausalWanAttentionBlock(nn.Module):
         current_start: int = 0,
         cache_start: Optional[int] = None,
         action_context: Optional[ActionContext] = None,
+        cache_mode: str = "read_write",
     ) -> torch.Tensor:
         r"""
         Forward pass through the attention block.
@@ -143,6 +144,7 @@ class CausalWanAttentionBlock(nn.Module):
                 freqs,
                 kv_cache,
                 current_start,
+                cache_mode=cache_mode,
             )
             x = self._adaln_gated_residual(x, y, gate_msa, f=num_frames)
 
@@ -380,6 +382,7 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
         kv_cache_mouse: Optional[List["RingBufferActionCache"]] = None,
         kv_cache_keyboard: Optional[List["RingBufferActionCache"]] = None,
         current_start: int = 0,
+        cache_mode: str = "read_write",
     ):
         device = self.patch_embedding.weight.device
         if self.freqs.device != device:
@@ -419,6 +422,7 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
                 action_context=action_context,
                 kv_cache=kv_cache[block_index],
                 current_start=current_start,
+                cache_mode=cache_mode,
             )
 
         x = self.head(x, e.reshape(*timesteps.shape, 1, -1))

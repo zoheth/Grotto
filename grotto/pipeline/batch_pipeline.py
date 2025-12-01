@@ -53,6 +53,7 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
                 * current_timestep
             )
 
+            # Denoising phase: read historical cache without writing
             flow_pred = self.predictor(
                 noisy_image_or_video=noisy_input,
                 conditional_inputs=conditional_inputs,
@@ -61,6 +62,7 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
                 kv_cache_mouse=mouse_cache,
                 kv_cache_keyboard=keyboard_cache,
                 current_start=current_start,
+                cache_mode="read_only",
             )
 
             denoised_pred = self.scheduler.convert_flow_to_x0(
@@ -99,6 +101,7 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
 
         visual_cache, mouse_cache, keyboard_cache = self.cache_manager.get_caches()
 
+        # Caching phase: append clean K/V to cache
         self.predictor(
             noisy_image_or_video=denoised_pred,
             conditional_inputs=conditional_inputs,
@@ -107,6 +110,7 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
             kv_cache_mouse=mouse_cache,
             kv_cache_keyboard=keyboard_cache,
             current_start=current_start_frame * self.config.model.frame_seq_length,
+            cache_mode="read_write",
         )
 
     def _decode_latent_to_video(

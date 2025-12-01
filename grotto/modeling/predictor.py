@@ -44,6 +44,7 @@ class WanDiffusionPredictor(nn.Module):
         kv_cache_keyboard: Optional[List["RingBufferActionCache"]] = None,
         current_start: Optional[int] = None,
         cache_start: Optional[int] = None,
+        cache_mode: str = "read_write",
     ) -> torch.Tensor:
         assert noisy_image_or_video.shape[1] == 16
 
@@ -73,6 +74,7 @@ class WanDiffusionPredictor(nn.Module):
             kv_cache_mouse=kv_cache_mouse,
             kv_cache_keyboard=kv_cache_keyboard,
             current_start=current_start,
+            cache_mode=cache_mode,
         )
 
         return flow_pred
