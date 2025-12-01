@@ -9,7 +9,6 @@ from grotto.modeling.modular_action import ActionContext
 from grotto.types import ConditionalInputs
 
 if TYPE_CHECKING:
-    from .paged_cache import PagedCache
     from .ring_buffer_cache import RingBufferActionCache
 
 
@@ -39,7 +38,7 @@ class WanDiffusionPredictor(nn.Module):
         noisy_image_or_video: torch.Tensor,
         conditional_inputs: ConditionalInputs,
         timestep: torch.Tensor,
-        kv_cache: List["PagedCache"],
+        kv_cache: List,
         kv_cache_mouse: Optional[List["RingBufferActionCache"]] = None,
         kv_cache_keyboard: Optional[List["RingBufferActionCache"]] = None,
         current_start: Optional[int] = None,
