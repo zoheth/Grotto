@@ -18,13 +18,15 @@ if TYPE_CHECKING:
 
 @dataclass
 class ActionContext:
-    # Input conditions
-    mouse_cond: Optional[torch.Tensor] = None  # [B, N_frames, C_mouse]
-    keyboard_cond: Optional[torch.Tensor] = None  # [B, N_frames, C_keyboard]
+    # Input conditions (camera control)
+    rotation_cond: Optional[torch.Tensor] = None  # [B, N_frames, C_rotation] - Camera rotation
+    translation_cond: Optional[
+        torch.Tensor
+    ] = None  # [B, N_frames, C_translation] - Camera movement
 
     # Per-block KV cache
-    kv_cache_mouse: Optional["RingBufferActionCache"] = None
-    kv_cache_keyboard: Optional["RingBufferActionCache"] = None
+    kv_cache_rotation: Optional["RingBufferActionCache"] = None
+    kv_cache_translation: Optional["RingBufferActionCache"] = None
 
     # Runtime configuration
     num_frame_per_block: int = 1
@@ -32,7 +34,7 @@ class ActionContext:
     @property
     def has_any_condition(self) -> bool:
         """Check if any action conditioning is provided."""
-        return self.mouse_cond is not None or self.keyboard_cond is not None
+        return self.rotation_cond is not None or self.translation_cond is not None
 
 
 class ActionModule(nn.Module):
@@ -70,25 +72,25 @@ class ActionModule(nn.Module):
         self,
         x: torch.Tensor,
         grid_sizes: tuple,
-        mouse_condition: Optional[torch.Tensor] = None,
-        keyboard_condition: Optional[torch.Tensor] = None,
+        rotation: Optional[torch.Tensor] = None,
+        translation: Optional[torch.Tensor] = None,
         is_causal: bool = False,
-        kv_cache_mouse: Optional["RingBufferActionCache"] = None,
-        kv_cache_keyboard: Optional["RingBufferActionCache"] = None,
+        kv_cache_rotation: Optional["RingBufferActionCache"] = None,
+        kv_cache_translation: Optional["RingBufferActionCache"] = None,
         start_frame: int = 0,
         num_frame_per_block: int = 3,
     ) -> torch.Tensor:
         """
-        Inject action conditions into hidden states.
+        Inject camera control conditions into hidden states.
 
         Args:
             x: [B, T*H*W, C] - Hidden states
             grid_sizes: (F, H, W) - Latent grid dimensions
-            mouse_condition: [B, N_frames, C_mouse] - Mouse condition
-            keyboard_condition: [B, N_frames, C_keyboard] - Keyboard condition
+            rotation: [B, N_frames, C_rotation] - Camera rotation (view direction)
+            translation: [B, N_frames, C_translation] - Camera translation (movement)
             is_causal: Whether to use causal attention
-            kv_cache_mouse: Mouse KV cache
-            kv_cache_keyboard: Keyboard KV cache
+            kv_cache_rotation: Rotation KV cache
+            kv_cache_translation: Translation KV cache
             start_frame: Starting frame index for RoPE
             num_frame_per_block: Number of frames per block
 
@@ -103,28 +105,28 @@ class ActionModule(nn.Module):
 
         hidden_states = x
 
-        # View control injection
-        if self.view_control_injector is not None and mouse_condition is not None:
+        # View control injection (camera rotation)
+        if self.view_control_injector is not None and rotation is not None:
             hidden_states = self.view_control_injector(
                 hidden_states,
-                condition=mouse_condition,
+                condition=rotation,
                 spatial_shape=(th, tw),
                 temporal_shape=tt,
                 is_causal=is_causal,
-                kv_cache=kv_cache_mouse,
+                kv_cache=kv_cache_rotation,
                 start_frame=start_frame,
                 num_frame_per_block=num_frame_per_block,
             )
 
-        # Movement injection
-        if self.movement_injector is not None and keyboard_condition is not None:
+        # Movement injection (camera translation)
+        if self.movement_injector is not None and translation is not None:
             hidden_states = self.movement_injector(
                 hidden_states,
-                condition=keyboard_condition,
+                condition=translation,
                 spatial_shape=(th, tw),
                 temporal_shape=tt,
                 is_causal=is_causal,
-                kv_cache=kv_cache_keyboard,
+                kv_cache=kv_cache_translation,
                 start_frame=start_frame,
                 num_frame_per_block=num_frame_per_block,
             )

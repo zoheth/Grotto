@@ -200,11 +200,11 @@ class CausalWanAttentionBlock(nn.Module):
             x = self.action_model(
                 x.to(context.dtype),
                 grid_sizes,
-                mouse_condition=action_context.mouse_cond,
-                keyboard_condition=action_context.keyboard_cond,
+                rotation=action_context.rotation_cond,
+                translation=action_context.translation_cond,
                 is_causal=True,
-                kv_cache_mouse=action_context.kv_cache_mouse,
-                kv_cache_keyboard=action_context.kv_cache_keyboard,
+                kv_cache_rotation=action_context.kv_cache_rotation,
+                kv_cache_translation=action_context.kv_cache_translation,
                 start_frame=start_frame,
                 num_frame_per_block=action_context.num_frame_per_block,
             )

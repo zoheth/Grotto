@@ -17,7 +17,7 @@ from torch import nn
 
 from grotto.modeling.modular_action.action_config import ActionConfig
 from grotto.modeling.modular_action.interfaces import ActionInjector, AttentionKernel
-from grotto.modeling.modular_action.kernels.preprocessor_kernel import mouse_preprocessor_triton
+from grotto.modeling.modular_action.kernels.preprocessor_kernel import rotation_preprocessor_triton
 
 if TYPE_CHECKING:
     from ..ring_buffer_cache import RingBufferActionCache
@@ -207,7 +207,7 @@ class ViewControlInjector(ActionInjector):
 
         # Fuse with view control condition using triton kernel (accepts B, T*S, C directly)
         # Output: [B, S, T, C_fused]
-        fused_features = mouse_preprocessor_triton(
+        fused_features = rotation_preprocessor_triton(
             x,  # [B, T*S, C_img]
             condition,
             T,  # temporal_shape

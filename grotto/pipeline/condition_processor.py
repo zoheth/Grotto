@@ -69,8 +69,8 @@ class ConditionProcessor:
         action_seq_len = self.get_action_sequence_length(current_block_end)
 
         if self.mode != "templerun":
-            new_cond["mouse_cond"] = conditional_dict["mouse_cond"][:, :action_seq_len]
-        new_cond["keyboard_cond"] = conditional_dict["keyboard_cond"][:, :action_seq_len]
+            new_cond["rotation_cond"] = conditional_dict["rotation_cond"][:, :action_seq_len]
+        new_cond["translation_cond"] = conditional_dict["translation_cond"][:, :action_seq_len]
         return new_cond, conditional_dict
 
     def _update_action(
@@ -89,16 +89,16 @@ class ConditionProcessor:
 
         start_pos = final_frame - action_frame_count
 
-        if self.mode != "templerun" and "mouse" in replace_action:
-            mouse_action = replace_action["mouse"][None, None, :]  # [1, 1, action_dim]
-            conditional_dict["mouse_cond"][:, start_pos:final_frame] = mouse_action.repeat(
+        if self.mode != "templerun" and "rotation" in replace_action:
+            rotation_action = replace_action["rotation"][None, None, :]  # [1, 1, action_dim]
+            conditional_dict["rotation_cond"][:, start_pos:final_frame] = rotation_action.repeat(
                 1, action_frame_count, 1
             )
 
-        if "keyboard" in replace_action:
-            keyboard_action = replace_action["keyboard"][None, None, :]  # [1, 1, action_dim]
-            conditional_dict["keyboard_cond"][:, start_pos:final_frame] = keyboard_action.repeat(
-                1, action_frame_count, 1
-            )
+        if "translation" in replace_action:
+            translation_action = replace_action["translation"][None, None, :]  # [1, 1, action_dim]
+            conditional_dict["translation_cond"][
+                :, start_pos:final_frame
+            ] = translation_action.repeat(1, action_frame_count, 1)
 
         return conditional_dict

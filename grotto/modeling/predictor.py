@@ -51,14 +51,14 @@ class WanDiffusionPredictor(nn.Module):
         else:
             input_timestep = timestep
 
-        mouse_cond = conditional_dict.get("mouse_cond")
-        keyboard_cond = conditional_dict.get("keyboard_cond")
+        rotation_cond = conditional_dict.get("rotation_cond")
+        translation_cond = conditional_dict.get("translation_cond")
 
         action_context = None
-        if mouse_cond is not None or keyboard_cond is not None:
+        if rotation_cond is not None or translation_cond is not None:
             action_context = ActionContext(
-                mouse_cond=mouse_cond,
-                keyboard_cond=keyboard_cond,
+                rotation_cond=rotation_cond,
+                translation_cond=translation_cond,
                 num_frame_per_block=self.num_frame_per_block,
             )
 

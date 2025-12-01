@@ -9,7 +9,7 @@ from einops import rearrange
 from safetensors.torch import load_file
 from torchvision.transforms import v2
 
-from grotto.conditions import Bench_actions_universal
+from grotto.camera_control import generate_camera_navigation
 from grotto.modeling.predictor import WanDiffusionPredictor
 from grotto.modeling.vae_wrapper import VaeDecoderWrapper, create_wan_encoder
 from grotto.modeling.weight_mapping_config import (
@@ -162,19 +162,17 @@ class VideoGenerator:
             "visual_context": visual_context.to(device=self.device, dtype=self.weight_dtype),
         }
 
-        cond_data = Bench_actions_universal(num_video_frames)
-        mouse_condition = (
-            cond_data["mouse_condition"]
+        camera_control = generate_camera_navigation(num_video_frames)
+        translation_cond = (
+            camera_control["translation"]
             .unsqueeze(0)
             .to(device=self.device, dtype=self.weight_dtype)
         )
-        conditional_dict["mouse_cond"] = mouse_condition
-        keyboard_condition = (
-            cond_data["keyboard_condition"]
-            .unsqueeze(0)
-            .to(device=self.device, dtype=self.weight_dtype)
+        conditional_dict["translation_cond"] = translation_cond
+        rotation_cond = (
+            camera_control["rotation"].unsqueeze(0).to(device=self.device, dtype=self.weight_dtype)
         )
-        conditional_dict["keyboard_cond"] = keyboard_condition
+        conditional_dict["rotation_cond"] = rotation_cond
 
         videos = self.pipeline.inference(
             noise=sampled_noise,
