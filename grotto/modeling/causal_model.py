@@ -13,6 +13,7 @@ from grotto.modeling.causal_self_attention import CausalSelfAttention, FlashInfe
 from grotto.modeling.cross_attention import I2VCrossAttention
 from grotto.modeling.modular_action import ActionConfig, ActionContext, ActionModule
 from grotto.modeling.paged_cache import PagedCache
+from grotto.profiling import record_module
 
 if TYPE_CHECKING:
     from .ring_buffer_cache import RingBufferActionCache
@@ -136,22 +137,27 @@ class CausalWanAttentionBlock(nn.Module):
             combined_modulation, "b f six c -> six b f 1 c"
         )
 
-        x_mod = self._adaln_modulate(self.norm1(x), shift_msa, scale_msa, f=num_frames)
-        y = self.self_attn(
-            x_mod,
-            grid_sizes,
-            freqs,
-            kv_cache,
-            current_start,
-            planner,
-        )
-        x = self._adaln_gated_residual(x, y, gate_msa, f=num_frames)
+        # Self-Attention block
+        with record_module("Self-Attention"):
+            x_mod = self._adaln_modulate(self.norm1(x), shift_msa, scale_msa, f=num_frames)
+            y = self.self_attn(
+                x_mod,
+                grid_sizes,
+                freqs,
+                kv_cache,
+                current_start,
+                planner,
+            )
+            x = self._adaln_gated_residual(x, y, gate_msa, f=num_frames)
 
+        # Cross-Attention and Action blocks
         x = self._apply_condition_attn(x, context, grid_sizes, current_start, action_context)
 
-        x_mod = self._adaln_modulate(self.norm2(x), shift_ffn, scale_ffn, f=num_frames)
-        y = self.ffn(x_mod)
-        x = self._adaln_gated_residual(x, y, gate_ffn, f=num_frames)
+        # FFN block
+        with record_module("FFN"):
+            x_mod = self._adaln_modulate(self.norm2(x), shift_ffn, scale_ffn, f=num_frames)
+            y = self.ffn(x_mod)
+            x = self._adaln_gated_residual(x, y, gate_ffn, f=num_frames)
 
         return x
 
@@ -185,7 +191,8 @@ class CausalWanAttentionBlock(nn.Module):
         current_start: int,
         action_context: Optional[ActionContext],
     ) -> torch.Tensor:
-        x = x + self.cross_attn(self.norm3(x.to(context.dtype)), context)
+        with record_module("CLIP Cross-Attn"):
+            x = x + self.cross_attn(self.norm3(x.to(context.dtype)), context)
 
         if self.action_model is not None:
             if action_context is None or not action_context.has_any_condition:
@@ -197,17 +204,18 @@ class CausalWanAttentionBlock(nn.Module):
             spatial_tokens_per_frame = int(grid_sizes[1] * grid_sizes[2])
             start_frame = current_start // spatial_tokens_per_frame
 
-            x = self.action_model(
-                x.to(context.dtype),
-                grid_sizes,
-                rotation=action_context.rotation_cond,
-                translation=action_context.translation_cond,
-                is_causal=True,
-                kv_cache_rotation=action_context.kv_cache_rotation,
-                kv_cache_translation=action_context.kv_cache_translation,
-                start_frame=start_frame,
-                num_frame_per_block=action_context.num_frame_per_block,
-            )
+            with record_module("Action Module"):
+                x = self.action_model(
+                    x.to(context.dtype),
+                    grid_sizes,
+                    rotation=action_context.rotation_cond,
+                    translation=action_context.translation_cond,
+                    is_causal=True,
+                    kv_cache_rotation=action_context.kv_cache_rotation,
+                    kv_cache_translation=action_context.kv_cache_translation,
+                    start_frame=start_frame,
+                    num_frame_per_block=action_context.num_frame_per_block,
+                )
 
         return x
 

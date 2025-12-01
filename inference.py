@@ -2,6 +2,7 @@ import os
 
 os.environ["PYTHONBREAKPOINT"] = "0"
 os.environ["_TYPER_STANDARD_TRACEBACK"] = "1"
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -11,6 +12,7 @@ from diffusers.utils.loading_utils import load_image
 
 from grotto.generator import VAECompileMode, VideoGenerator
 from grotto.misc import set_seed
+from grotto.profiling import profiling_session
 
 
 def process_video(input_video, output_video):
@@ -56,7 +58,19 @@ def main(
     )
 
     image = load_image(str(img_path))
-    video = generator.generate(image, num_output_frames)
+
+    if enable_profile:
+        timestamp = datetime.now().strftime("%y%m%d_%H%M")
+        trace_dir = output_folder / "profile_trace"
+        os.makedirs(trace_dir, exist_ok=True)
+        trace_path = str(trace_dir / f"grotto_{timestamp}")
+
+        with profiling_session(trace_path):
+            video = generator.generate(image, num_output_frames)
+
+        print(f"Profile: {trace_path}.json")
+    else:
+        video = generator.generate(image, num_output_frames)
 
     process_video(video.astype(np.uint8), output_folder / "demo.mp4")
 

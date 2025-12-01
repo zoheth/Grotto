@@ -18,6 +18,7 @@ from grotto.modeling.weight_mapping_config import (
     detect_old_predictor_format,
 )
 from grotto.pipeline import BatchCausalInferencePipeline, PipelineConfig
+from grotto.profiling import record_module
 from grotto.types import ConditionalInputs
 
 
@@ -131,54 +132,66 @@ class VideoGenerator:
 
     @torch.no_grad()
     def generate(self, image: PIL.Image.Image, num_frames=150, seed=0):
-        image = self._resizecrop(image, 352, 640)
-        image_tensor = self.frame_process(image)[None, :, None, :, :].to(
-            dtype=self.weight_dtype, device=self.device
-        )
+        # Image preprocessing
+        with record_module("Image Preprocessing"):
+            image = self._resizecrop(image, 352, 640)
+            image_tensor = self.frame_process(image)[None, :, None, :, :].to(
+                dtype=self.weight_dtype, device=self.device
+            )
 
-        padding_video = torch.zeros_like(image_tensor).repeat(1, 1, 4 * (num_frames - 1), 1, 1)
-        img_cond = torch.concat([image_tensor, padding_video], dim=2)
-        vae_config = self.config.vae
-        img_cond = self.vae_encoder.encode(
-            img_cond,
-            device=self.device,
-            tiled=vae_config.use_tiling,
-            tile_size=list(vae_config.tile_size),
-            tile_stride=list(vae_config.tile_stride),
-        ).to(self.device)
+        # VAE encoding
+        with record_module("VAE Encoder"):
+            padding_video = torch.zeros_like(image_tensor).repeat(1, 1, 4 * (num_frames - 1), 1, 1)
+            img_cond = torch.concat([image_tensor, padding_video], dim=2)
+            vae_config = self.config.vae
+            img_cond = self.vae_encoder.encode(
+                img_cond,
+                device=self.device,
+                tiled=vae_config.use_tiling,
+                tile_size=list(vae_config.tile_size),
+                tile_stride=list(vae_config.tile_stride),
+            ).to(self.device)
 
-        mask_cond = torch.ones_like(img_cond)
-        mask_cond[:, :, 1:] = 0
-        cond_concat = torch.cat([mask_cond[:, :4], img_cond], dim=1)
+        # Prepare conditions
+        with record_module("Condition Preparation"):
+            mask_cond = torch.ones_like(img_cond)
+            mask_cond[:, :, 1:] = 0
+            cond_concat = torch.cat([mask_cond[:, :4], img_cond], dim=1)
 
-        visual_context = self.vae_encoder.clip.encode_video(image_tensor)
+        # CLIP encoding
+        with record_module("CLIP Encoder"):
+            visual_context = self.vae_encoder.clip.encode_video(image_tensor)
 
-        sampled_noise = torch.randn(
-            [1, 16, num_frames, 44, 80], device=self.device, dtype=self.weight_dtype
-        )
+        # Noise and camera control
+        with record_module("Setup (Noise & Camera)"):
+            sampled_noise = torch.randn(
+                [1, 16, num_frames, 44, 80], device=self.device, dtype=self.weight_dtype
+            )
+            num_video_frames = (num_frames - 1) * 4 + 1
+            camera_control = generate_camera_navigation(num_video_frames).unsqueeze_batch()
 
-        num_video_frames = (num_frames - 1) * 4 + 1
+            conditional_inputs = ConditionalInputs(
+                cond_concat=cond_concat,
+                visual_context=visual_context,
+                rotation_cond=camera_control.rotation,
+                translation_cond=camera_control.translation,
+            ).to(device=self.device, dtype=self.weight_dtype)
 
-        camera_control = generate_camera_navigation(num_video_frames).unsqueeze_batch()
+        # Diffusion inference
+        with record_module("Diffusion Pipeline"):
+            videos = self.pipeline.inference(
+                noise=sampled_noise,
+                conditional_inputs=conditional_inputs,
+                return_latents=False,
+            )
 
-        conditional_inputs = ConditionalInputs(
-            cond_concat=cond_concat,
-            visual_context=visual_context,
-            rotation_cond=camera_control.rotation,
-            translation_cond=camera_control.translation,
-        ).to(device=self.device, dtype=self.weight_dtype)
+        # Post-processing
+        with record_module("Post-processing"):
+            assert isinstance(videos, list)
+            videos_tensor = torch.cat(videos, dim=1)
 
-        videos = self.pipeline.inference(
-            noise=sampled_noise,
-            conditional_inputs=conditional_inputs,
-            return_latents=False,
-        )
-
-        assert isinstance(videos, list)
-        videos_tensor = torch.cat(videos, dim=1)
-
-        videos = rearrange(videos_tensor, "B T C H W -> B T H W C")
-        videos = ((videos.float() + 1) * 127.5).clip(0, 255).cpu().numpy().astype(np.uint8)[0]
-        video = np.ascontiguousarray(videos)
+            videos = rearrange(videos_tensor, "B T C H W -> B T H W C")
+            videos = ((videos.float() + 1) * 127.5).clip(0, 255).cpu().numpy().astype(np.uint8)[0]
+            video = np.ascontiguousarray(videos)
 
         return video
