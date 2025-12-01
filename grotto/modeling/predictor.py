@@ -25,7 +25,7 @@ class WanDiffusionPredictor(nn.Module):
         self.num_frame_per_block = num_frame_per_block
 
         self.model_config = CausalWanModel.load_config(model_config_path)
-        self.model = typing.cast(CausalWanModel, CausalWanModel.from_config(self.model_config))
+        self.model = typing.cast(CausalWanModel, CausalWanModel.from_config(self.model_config))  # type: ignore
         self.model.eval()
 
         self.uniform_timestep = not is_causal

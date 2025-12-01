@@ -94,6 +94,14 @@ class CausalSelfAttention(nn.Module):
 
         self.rope_cache: Optional[RoPE3DCache] = None
 
+        workspace_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device="cuda")
+        self.flashinfer_wrapper = flashinfer.BatchPrefillWithRaggedKVCacheWrapper(
+            workspace_buffer, "NHD"
+        )
+
+        self.kv_indptr = torch.zeros(2, dtype=torch.int32, device="cuda")
+        self.qo_indptr = torch.zeros(2, dtype=torch.int32, device="cuda")
+
     def _init_rope_cache(self, freqs: torch.Tensor):
         if self.rope_cache is None:
             self.rope_cache = RoPE3DCache(freqs=freqs, height=self.height, width=self.width)
@@ -141,20 +149,11 @@ class CausalSelfAttention(nn.Module):
         current_end = current_start + roped_k_squeezed.shape[0]
 
         if cache_mode == "read_only":
-            # Denoising phase: read historical cache and concat with current K/V
-            k_history, v_history = kv_cache.read()
-            if k_history.shape[0] > 0:
-                k_full = torch.cat([k_history, roped_k_squeezed], dim=0)
-                v_full = torch.cat([v_history, v_squeezed], dim=0)
-            else:
-                k_full = roped_k_squeezed
-                v_full = v_squeezed
-
-            q_for_flash = roped_q.squeeze(0)
-            x = flashinfer.single_prefill_with_kv_cache(
-                q_for_flash, k_full, v_full, causal=False, kv_layout="NHD"
-            )
-            x = x.unsqueeze(0)
+            (
+                k_linear,
+                v_linear,
+                valid_len_tensor,
+            ) = kv_cache.prepare_linear_cache_with_temporary_data(roped_k_squeezed, v_squeezed)
 
         elif cache_mode == "read_write":
             # Caching phase: append clean K/V to cache
@@ -170,18 +169,36 @@ class CausalSelfAttention(nn.Module):
                 keep_size = current_end - keep_from_position
 
             kv_cache.evict(keep_size)
-            k_cache, v_cache = kv_cache.read()
+            # k_cache, v_cache = kv_cache.read()
 
-            q_for_flash = roped_q.squeeze(0)
-            x = flashinfer.single_prefill_with_kv_cache(
-                q_for_flash, k_cache, v_cache, causal=False, kv_layout="NHD"
-            )
-            x = x.unsqueeze(0)
+            k_linear, v_linear, valid_len_tensor = kv_cache.prepare_linear_cache()
 
         else:
             raise ValueError(
                 f"Invalid cache_mode: {cache_mode}. Must be 'read_only' or 'read_write'"
             )
+
+        q_len = x.shape[1]
+
+        self.qo_indptr[1] = q_len
+        self.kv_indptr[1] = valid_len_tensor
+
+        self.flashinfer_wrapper.begin_forward(
+            self.qo_indptr,
+            self.kv_indptr,
+            num_qo_heads=self.num_heads,
+            num_kv_heads=self.num_heads,
+            head_dim_qk=self.head_dim,
+            head_dim_vo=self.head_dim,
+            q_data_type=torch.bfloat16,
+        )
+
+        q_for_flash = roped_q.squeeze(0)
+        # x = flashinfer.single_prefill_with_kv_cache(
+        #     q_for_flash, k_cache, v_cache, causal=False, kv_layout="NHD"
+        # )
+        x = self.flashinfer_wrapper.run(q_for_flash, k_linear, v_linear)
+        x = x.unsqueeze(0)
 
         x = x.flatten(2)
         x = self.o(x)

@@ -6,8 +6,6 @@ import torch
 
 
 class RingBufferVisualCache:
-    """Visual KV cache with O(1) eviction and full CUDA Graph support."""
-
     def __init__(
         self,
         max_seq_len: int,
@@ -25,11 +23,13 @@ class RingBufferVisualCache:
         self.k_cache = torch.zeros((max_seq_len, num_heads, head_dim), dtype=dtype, device=device)
         self.v_cache = torch.zeros((max_seq_len, num_heads, head_dim), dtype=dtype, device=device)
 
+        self.k_linear = torch.zeros((max_seq_len, num_heads, head_dim), dtype=dtype, device=device)
+        self.v_linear = torch.zeros((max_seq_len, num_heads, head_dim), dtype=dtype, device=device)
+
         self.write_pos = torch.zeros(1, dtype=torch.long, device=device)
         self.valid_len = torch.zeros(1, dtype=torch.long, device=device)
 
         self._arange = torch.arange(max_seq_len, device=device, dtype=torch.long)
-        self._max_seq_len_tensor = torch.tensor([max_seq_len], dtype=torch.long, device=device)
         self._zero = torch.zeros(1, dtype=torch.long, device=device)
 
     def reset(self):
@@ -57,6 +57,34 @@ class RingBufferVisualCache:
         self._write_with_wrap(k, v, self.write_pos, incoming_len)
         self.write_pos.add_(incoming_len).fmod_(self.max_seq_len)
         self.valid_len.add_(incoming_len).clamp_(max=self.max_seq_len)
+
+    def prepare_linear_cache(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        start_idx = (self.write_pos - self.valid_len) % self.max_seq_len
+        read_indices = (start_idx + self._arange) % self.max_seq_len
+
+        torch.index_select(self.k_cache, 0, read_indices, out=self.k_linear)
+        torch.index_select(self.v_cache, 0, read_indices, out=self.v_linear)
+
+        return self.k_linear, self.v_linear, self.valid_len
+
+    def prepare_linear_cache_with_temporary_data(
+        self, k_new: torch.Tensor, v_new: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        准备包含 [历史数据 + 临时新数据] 的线性缓存。
+
+        前提假设: self.k_linear 的历史部分(0:valid_len) 已经是同步好的
+        """
+        new_len = k_new.shape[0]
+
+        append_indices = self.valid_len + self._arange[:new_len]
+
+        self.k_linear.index_put_((append_indices,), k_new)
+        self.v_linear.index_put_((append_indices,), v_new)
+
+        total_len = self.valid_len + new_len
+
+        return self.k_linear, self.v_linear, total_len
 
     def _write_with_wrap(
         self, k: torch.Tensor, v: torch.Tensor, start_offset: torch.Tensor, incoming_len: int
