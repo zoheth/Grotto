@@ -117,20 +117,17 @@ class VideoGenerator:
 
         return vae_decoder
 
-    def _resizecrop(self, image: PIL.Image.Image, th, tw):
+    def _resizecrop(self, image: PIL.Image.Image, target_h: int, target_w: int):
         w, h = image.size
-        if h / w > th / tw:
-            new_w = int(w)
-            new_h = int(new_w * th / tw)
+        target_ratio = target_w / target_h
+
+        if w / h > target_ratio:
+            new_w, new_h = int(h * target_ratio), h
         else:
-            new_h = int(h)
-            new_w = int(new_h * tw / th)
-        left = (w - new_w) / 2
-        top = (h - new_h) / 2
-        right = (w + new_w) / 2
-        bottom = (h + new_h) / 2
-        image = image.crop((left, top, right, bottom))
-        return image
+            new_w, new_h = w, int(w / target_ratio)
+
+        left, top = (w - new_w) / 2, (h - new_h) / 2
+        return image.crop((left, top, left + new_w, top + new_h))
 
     @torch.no_grad()
     def generate(self, image: PIL.Image.Image, num_frames=150, seed=0):
@@ -141,10 +138,14 @@ class VideoGenerator:
 
         padding_video = torch.zeros_like(image_tensor).repeat(1, 1, 4 * (num_frames - 1), 1, 1)
         img_cond = torch.concat([image_tensor, padding_video], dim=2)
-        tiler_kwargs = {"tiled": True, "tile_size": [44, 80], "tile_stride": [23, 38]}
-        img_cond = self.vae_encoder.encode(img_cond, device=self.device, **tiler_kwargs).to(
-            self.device
-        )
+        vae_config = self.config.vae
+        img_cond = self.vae_encoder.encode(
+            img_cond,
+            device=self.device,
+            tiled=vae_config.use_tiling,
+            tile_size=list(vae_config.tile_size),
+            tile_stride=list(vae_config.tile_stride),
+        ).to(self.device)
 
         mask_cond = torch.ones_like(img_cond)
         mask_cond[:, :, 1:] = 0

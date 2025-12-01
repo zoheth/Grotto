@@ -106,6 +106,10 @@ class VAEConfig:
     spatial_compression: int = 8
     """Spatial compression factor (pixels)"""
 
+    use_tiling: bool = True
+    tile_size: tuple[int, int] = (44, 80)
+    tile_stride: tuple[int, int] = (23, 38)
+
     def get_latent_frame_count(self, video_frames: int) -> int:
         """
         Convert video frame count to latent frame count.
