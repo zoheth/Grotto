@@ -14,7 +14,7 @@ class CacheManager:
         cache_config: CacheConfig,
         device: torch.device,
         dtype: torch.dtype,
-        page_size: int = 16,
+        page_size: int = 256,
     ):
         self.model_config = model_config
         self.cache_config = cache_config

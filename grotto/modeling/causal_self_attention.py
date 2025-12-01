@@ -10,6 +10,7 @@ Architecture:
 
 from typing import Optional, Tuple
 
+import flashinfer
 import torch
 import torch.nn as nn
 from flashinfer import BatchPrefillWithPagedKVCacheWrapper
@@ -18,64 +19,51 @@ from grotto.modeling.paged_cache import PagedCache
 
 
 class RoPE3DCache:
-    """On-demand 3D RoPE frequency computation for efficient inference."""
-
     def __init__(
         self,
-        freqs: torch.Tensor,  # [max_positions, head_dim//2]
+        freqs: torch.Tensor,
         height: int,
         width: int,
+        max_frames: int = 150,
     ):
-        self.height = height
-        self.width = width
-        self.device = freqs.device
-        self.dtype = freqs.dtype
+        device = freqs.device
+
+        # If freqs is complex (e^(iθ)), extract real and imaginary parts
+        # Otherwise assume it's already angles and convert to complex first
+        if freqs.is_complex():
+            freqs = freqs.to(device=device)
+        else:
+            freqs = freqs.to(dtype=torch.float32, device=device)
 
         head_dim_half = freqs.shape[1]
-        c = head_dim_half
-        self.c_time = c - 2 * (c // 3)
-        self.c_height = c // 3
-        self.c_width = c // 3
-        self.head_dim_half = head_dim_half
+        c_height = head_dim_half // 3
+        c_width = head_dim_half // 3
+        c_time = head_dim_half - c_height - c_width
 
-        self.freqs_time = freqs[:, : self.c_time].to(self.device)
-        self.freqs_height = freqs[:, self.c_time : self.c_time + self.c_height].to(self.device)
-        self.freqs_width = freqs[:, self.c_time + self.c_height :].to(self.device)
+        freqs_time = freqs[:max_frames, :c_time]
+        freqs_height = freqs[:height, c_time : c_time + c_height]
+        freqs_width = freqs[:width, c_time + c_height :]
 
-    def get_freqs_for_frame_range(self, start_frame: int, num_frames: int) -> torch.Tensor:
-        """Compute frequencies for a range of frames on-demand."""
-        end_frame = start_frame + num_frames
+        t_grid = freqs_time.view(max_frames, 1, 1, -1).expand(max_frames, height, width, -1)
+        h_grid = freqs_height.view(1, height, 1, -1).expand(max_frames, height, width, -1)
+        w_grid = freqs_width.view(1, 1, width, -1).expand(max_frames, height, width, -1)
 
-        if end_frame > self.freqs_time.shape[0]:
-            raise ValueError(
-                f"Frame range [{start_frame}:{end_frame}] exceeds frequency table size {self.freqs_time.shape[0]}"
-            )
+        flat_freqs = torch.cat([t_grid, h_grid, w_grid], dim=-1).reshape(-1, head_dim_half)
 
-        f, h, w = num_frames, self.height, self.width
+        # If freqs is complex (e^(iθ)), extract cos (real) and sin (imag) directly
+        # Otherwise compute cos and sin from angles
+        if flat_freqs.is_complex():
+            cos = flat_freqs.real.float()
+            sin = flat_freqs.imag.float()
+        else:
+            cos = torch.cos(flat_freqs)
+            sin = torch.sin(flat_freqs)
 
-        time_freqs = self.freqs_time[start_frame:end_frame].view(f, 1, 1, -1).expand(f, h, w, -1)
-        height_freqs = self.freqs_height[:h].view(1, h, 1, -1).expand(f, h, w, -1)
-        width_freqs = self.freqs_width[:w].view(1, 1, w, -1).expand(f, h, w, -1)
+        # FlashInfer expects: [max_pos, rotary_dim] where first half is cos, second half is sin
+        self.global_cache = torch.cat([cos, sin], dim=-1).contiguous()
 
-        freqs = torch.cat([time_freqs, height_freqs, width_freqs], dim=-1)
-        return freqs.reshape(-1, 1, self.head_dim_half)
-
-
-def apply_rope_3d(
-    x: torch.Tensor,  # [B, seq_len, num_heads, head_dim]
-    freqs: torch.Tensor,  # [seq_len, 1, head_dim//2]
-) -> torch.Tensor:
-    """Apply 3D RoPE using precomputed frequencies."""
-    B, seq_len, num_heads, head_dim = x.shape
-
-    x_complex = torch.view_as_complex(
-        x.reshape(B, seq_len, num_heads, head_dim // 2, 2).to(torch.float64)
-    )
-
-    x_rotated = x_complex * freqs.unsqueeze(0)
-    x_out = torch.view_as_real(x_rotated).flatten(-2)
-
-    return x_out.type_as(x)
+    def get_cache(self) -> torch.Tensor:
+        return self.global_cache
 
 
 class FlashInferPlanner:
@@ -202,7 +190,7 @@ class CausalSelfAttention(nn.Module):
         eps: float = 1e-6,
         height: int = 22,
         width: int = 40,
-        page_size: int = 16,
+        page_size: int = 256,  # Increased from 16 to reduce d2d copies (880 tokens/frame ÷ 256 = ~4 copies)
     ):
         super().__init__()
 
@@ -263,19 +251,36 @@ class CausalSelfAttention(nn.Module):
 
         assert self.rope_cache is not None
 
-        num_frames, height, width = grid_sizes
+        _, height, width = grid_sizes
         frame_seqlen = height * width
-        current_start_frame = current_start // frame_seqlen
 
-        precomputed_freqs = self.rope_cache.get_freqs_for_frame_range(
-            current_start_frame, num_frames
+        nnz = B * s
+        q_flat = q.view(nnz, n * d)
+        k_flat = k.view(nnz, n * d)
+        positions = torch.arange(
+            current_start, current_start + nnz, dtype=torch.int32, device=x.device
         )
 
-        roped_q = apply_rope_3d(q, precomputed_freqs)
-        roped_k = apply_rope_3d(k, precomputed_freqs)
+        cache = self.rope_cache.get_cache()
 
-        roped_k_squeezed = roped_k.squeeze(0)
-        v_squeezed = v.squeeze(0)
+        # FlashInfer RoPE with cos/sin cache
+        # Cache format: [max_pos, rotary_dim] where first half is cos, second half is sin
+        # Use is_neox=False for interleaved rotation (matches original apply_rope_3d)
+        roped_q_flat, roped_k_flat = flashinfer.apply_rope_with_cos_sin_cache(
+            positions,
+            q_flat,
+            k_flat,
+            head_size=d,
+            cos_sin_cache=cache,
+            is_neox=False,  # Interleaved format like original implementation
+        )
+        # Restore shape with batch dimension [B, s, n, d]
+        roped_q = roped_q_flat.view(B, s, self.num_heads, self.head_dim)
+        roped_k = roped_k_flat.view(B, s, self.num_heads, self.head_dim)
+
+        # Ensure tensors are contiguous before cache write to avoid extra d2d copies
+        roped_k_squeezed = roped_k.squeeze(0).contiguous()
+        v_squeezed = v.squeeze(0).contiguous()
         current_end = current_start + roped_k_squeezed.shape[0]
 
         kv_cache.update_or_append(roped_k_squeezed, v_squeezed, current_end)

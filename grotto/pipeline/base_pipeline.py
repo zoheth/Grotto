@@ -27,7 +27,7 @@ class BaseCausalInferencePipeline(torch.nn.Module, ABC):
         predictor: WanDiffusionPredictor,
         vae_decoder,
         device: str = "cuda",
-        page_size: int = 16,
+        page_size: int = 256,
     ):
         super().__init__()
         self.config = config

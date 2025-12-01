@@ -18,7 +18,7 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
         predictor,
         vae_decoder,
         device: str = "cuda",
-        page_size: int = 16,
+        page_size: int = 256,
     ):
         super().__init__(config, predictor, vae_decoder, device, page_size=page_size)
 
