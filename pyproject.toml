@@ -64,3 +64,6 @@ line-ending = "auto"
 
 [tool.ruff.lint.isort]
 known-first-party = ["grotto"]
+
+[tool.ruff.lint.per-file-ignores]
+"inference.py" = ["E402"]

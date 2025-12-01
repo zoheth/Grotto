@@ -1,6 +1,6 @@
-from dataclasses import dataclass, field, asdict
-from typing import List, Dict, Any
 import json
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List
 
 
 @dataclass
@@ -36,11 +36,15 @@ class ActionConfig:
         head_dim = self.img_hidden_size // self.heads_num
         if sum(self.rope_dim_list) != head_dim:
             print(f"Warning: sum(rope_dim_list)={sum(self.rope_dim_list)} != head_dim={head_dim}")
-            print(f"RoPE dimensions will be auto-adjusted at runtime to [{head_dim//3}, {head_dim//3}, {head_dim//3}]")
+            print(
+                f"RoPE dimensions will be auto-adjusted at runtime to [{head_dim // 3}, {head_dim // 3}, {head_dim // 3}]"
+            )
 
         mouse_head_dim = self.mouse_hidden_dim // self.heads_num
         if sum(self.mouse_qk_dim_list) != mouse_head_dim:
-            print(f"Warning: sum(mouse_qk_dim_list)={sum(self.mouse_qk_dim_list)} != mouse_head_dim={mouse_head_dim}")
+            print(
+                f"Warning: sum(mouse_qk_dim_list)={sum(self.mouse_qk_dim_list)} != mouse_head_dim={mouse_head_dim}"
+            )
             print("Mouse RoPE dimensions will be auto-adjusted at runtime")
 
         assert len(self.patch_size) == 3, "patch_size must have 3 elements [T, H, W]"
@@ -49,12 +53,12 @@ class ActionConfig:
             print("Warning: Both keyboard and mouse are disabled!")
 
     @classmethod
-    def from_dict(cls, config_dict: Dict[str, Any]) -> 'ActionConfig':
+    def from_dict(cls, config_dict: Dict[str, Any]) -> "ActionConfig":
         return cls(**config_dict)
 
     @classmethod
-    def from_json(cls, json_path: str) -> 'ActionConfig':
-        with open(json_path, 'r') as f:
+    def from_json(cls, json_path: str) -> "ActionConfig":
+        with open(json_path) as f:
             config_dict = json.load(f)
         return cls.from_dict(config_dict)
 
@@ -62,7 +66,7 @@ class ActionConfig:
         return asdict(self)
 
     def to_json(self, json_path: str, indent: int = 2):
-        with open(json_path, 'w') as f:
+        with open(json_path, "w") as f:
             json.dump(self.to_dict(), f, indent=indent)
 
     def __repr__(self) -> str:

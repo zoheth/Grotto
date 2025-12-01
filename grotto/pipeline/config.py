@@ -6,8 +6,9 @@ into type-safe, well-documented dataclasses.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional
+
 from omegaconf import OmegaConf
+
 
 @dataclass
 class ModelConfig:
@@ -43,6 +44,7 @@ class ModelConfig:
     def total_attention_dim(self) -> int:
         """Total dimension of attention (num_heads * head_dim)"""
         return self.num_attention_heads * self.head_dim
+
 
 @dataclass
 class CacheConfig:
@@ -215,18 +217,18 @@ class PipelineConfig:
     inference: InferenceConfig = field(default_factory=InferenceConfig)
     """Inference process configuration"""
 
-    mode: str = 'universal'
+    mode: str = "universal"
     """Game mode: 'universal', 'gta_drive', or 'templerun'"""
 
     def __post_init__(self):
         """Validate configuration after initialization."""
-        if self.mode not in ['universal', 'gta_drive', 'templerun']:
+        if self.mode not in ["universal", "gta_drive", "templerun"]:
             raise ValueError(f"Invalid mode: {self.mode}")
 
         self.inference.validate(self.vae)
 
     @classmethod
-    def load(cls, config_path: str) -> 'PipelineConfig':
+    def load(cls, config_path: str) -> "PipelineConfig":
         config = OmegaConf.load(config_path)
 
         local_attn_size = config.cache.local_attn_size
@@ -241,18 +243,18 @@ class PipelineConfig:
             denoising_steps=denoising_steps,
             warp_denoising_step=warp_denoising,
             context_noise=context_noise,
-            num_frame_per_block=num_frame_per_block
+            num_frame_per_block=num_frame_per_block,
         )
 
         # Extract VAE config (using defaults for now)
         vae_config = VAEConfig()
 
         mode = config.mode
-        
+
         return cls(
             model_config_path=config.model_config_path,
             cache=cache_config,
             vae=vae_config,
             inference=inference_config,
-            mode=mode
+            mode=mode,
         )

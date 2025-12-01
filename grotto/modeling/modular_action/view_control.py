@@ -9,14 +9,14 @@ Terminology:
     Input sources: Mouse movement, gamepad right stick, etc.
 """
 
-from typing import Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
-from torch import nn
 from einops import rearrange
+from torch import nn
 
-from grotto.modeling.modular_action.interfaces import ActionInjector, AttentionKernel
 from grotto.modeling.modular_action.action_config import ActionConfig
+from grotto.modeling.modular_action.interfaces import ActionInjector, AttentionKernel
 from grotto.modeling.modular_action.kernels.preprocessor_kernel import mouse_preprocessor_triton
 
 if TYPE_CHECKING:
@@ -73,7 +73,11 @@ class ViewControlPreprocessor(nn.Module):
 
             group_view = [
                 view_control_padded[
-                    :, self.vae_time_compression_ratio * (i - self.windows_size) + pad_t : i * self.vae_time_compression_ratio + pad_t, :
+                    :,
+                    self.vae_time_compression_ratio * (i - self.windows_size) + pad_t : i
+                    * self.vae_time_compression_ratio
+                    + pad_t,
+                    :,
                 ]
                 for i in range(start_global_idx, end_global_idx)
             ]
@@ -81,7 +85,11 @@ class ViewControlPreprocessor(nn.Module):
             N_feats = T_q  # Should match temporal shape
             group_view = [
                 view_control_padded[
-                    :, self.vae_time_compression_ratio * (i - self.windows_size) + pad_t : i * self.vae_time_compression_ratio + pad_t, :
+                    :,
+                    self.vae_time_compression_ratio * (i - self.windows_size) + pad_t : i
+                    * self.vae_time_compression_ratio
+                    + pad_t,
+                    :,
                 ]
                 for i in range(N_feats)
             ]
@@ -151,7 +159,9 @@ class ViewControlInjector(ActionInjector):
 
         # Output projection
         self.proj_view = nn.Linear(
-            action_config.mouse_hidden_dim, action_config.img_hidden_size, bias=action_config.qkv_bias
+            action_config.mouse_hidden_dim,
+            action_config.img_hidden_size,
+            bias=action_config.qkv_bias,
         )
 
         # Attention core
@@ -215,9 +225,7 @@ class ViewControlInjector(ActionInjector):
 
         # QKV projection and split
         qkv = self.t_qkv(fused_features)  # [BS, T, 3*C_view]
-        q, k, v = rearrange(
-            qkv, "BS T (K H D) -> K BS T H D", K=3, H=self.action_config.heads_num
-        )
+        q, k, v = rearrange(qkv, "BS T (K H D) -> K BS T H D", K=3, H=self.action_config.heads_num)
 
         # QK normalization
         q = self.q_norm(q).to(v.dtype)
@@ -244,14 +252,13 @@ class ViewControlInjector(ActionInjector):
                 max_attention_size=self.max_attention_size,
             )
             # Compute attention with cached KV (RoPE already applied, pass mask for padding handling)
-            attn_output = self.attn_core(q_rope, k_window, v_window, causal=False, use_rope=False, kv_mask=kv_mask)
+            attn_output = self.attn_core(
+                q_rope, k_window, v_window, causal=False, use_rope=False, kv_mask=kv_mask
+            )
         else:
             # Regular attention: use FlashInfer's integrated RoPE for best performance
             attn_output = self.attn_core(
-                q, k, v,
-                causal=is_causal,
-                use_rope=True,
-                rope_offset=start_frame
+                q, k, v, causal=is_causal, use_rope=True, rope_offset=start_frame
             )
 
         # Reshape and project: [BS, T, H, D] -> [B, T*S, C_img]

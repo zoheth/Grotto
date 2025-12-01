@@ -9,9 +9,11 @@ Architecture:
 """
 
 from typing import Optional, Tuple
+
 import torch
 import torch.nn as nn
 from flashinfer import BatchPrefillWithPagedKVCacheWrapper
+
 from grotto.modeling.paged_cache import PagedCache
 
 
@@ -36,15 +38,11 @@ class RoPE3DCache:
         self.c_width = c // 3
         self.head_dim_half = head_dim_half
 
-        self.freqs_time = freqs[:, :self.c_time].to(self.device)
-        self.freqs_height = freqs[:, self.c_time:self.c_time + self.c_height].to(self.device)
-        self.freqs_width = freqs[:, self.c_time + self.c_height:].to(self.device)
+        self.freqs_time = freqs[:, : self.c_time].to(self.device)
+        self.freqs_height = freqs[:, self.c_time : self.c_time + self.c_height].to(self.device)
+        self.freqs_width = freqs[:, self.c_time + self.c_height :].to(self.device)
 
-    def get_freqs_for_frame_range(
-        self,
-        start_frame: int,
-        num_frames: int
-    ) -> torch.Tensor:
+    def get_freqs_for_frame_range(self, start_frame: int, num_frames: int) -> torch.Tensor:
         """Compute frequencies for a range of frames on-demand."""
         end_frame = start_frame + num_frames
 
@@ -107,15 +105,12 @@ class FlashInferPlanner:
         """Initialize FlashInfer workspace and wrapper."""
         if self._workspace_buffer is None:
             self._workspace_buffer = torch.empty(
-                self.workspace_size,
-                dtype=torch.uint8,
-                device=device
+                self.workspace_size, dtype=torch.uint8, device=device
             )
 
         if self._prefill_wrapper is None:
             self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                self._workspace_buffer,
-                kv_layout="NHD"
+                self._workspace_buffer, kv_layout="NHD"
             )
 
     def plan(
@@ -128,7 +123,9 @@ class FlashInferPlanner:
         """Execute plan for the current generation step."""
         self.init(device)
 
-        paged_kv_indices, paged_kv_indptr, paged_kv_last_page_len = kv_cache.get_flashinfer_meta(device)
+        paged_kv_indices, paged_kv_indptr, paged_kv_last_page_len = kv_cache.get_flashinfer_meta(
+            device
+        )
         qo_indptr = torch.tensor([0, q_len], dtype=torch.int32, device=device)
 
         assert self._prefill_wrapper is not None

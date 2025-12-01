@@ -1,17 +1,14 @@
-import logging
-from dataclasses import dataclass
-from typing import List, Optional, Union, Tuple
+from typing import List, Optional, Union
 
 import torch
-import torch.cuda.amp as amp
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import rearrange
 from torch.nn.common_types import _size_3_t
 from torch.nn.modules.utils import _triple
-from einops import rearrange
-
 
 CACHE_T = 2
+
 
 class CacheState:
     """Manages temporal caching for streaming video decoding."""
@@ -31,18 +28,21 @@ class CacheState:
     def increment_index(self):
         self.idx += 1
 
+
 class CausalConv3d(nn.Conv3d):
     """3D convolution with causal temporal padding for autoregressive video generation."""
 
-    def __init__(self,
-                 in_channels: int,
-                out_channels: int,
-                kernel_size: _size_3_t,
-                stride: _size_3_t = 1,
-                padding: Union[str, _size_3_t] = 0,
-                dilation: _size_3_t = 1,
-                groups: int = 1,
-                bias: bool = True,):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: _size_3_t,
+        stride: _size_3_t = 1,
+        padding: Union[str, _size_3_t] = 0,
+        dilation: _size_3_t = 1,
+        groups: int = 1,
+        bias: bool = True,
+    ):
         k_t, _, _ = _triple(kernel_size)
         d_t, _, _ = _triple(dilation)
 
@@ -62,9 +62,12 @@ class CausalConv3d(nn.Conv3d):
         self.spatial_padding_w = padding_w
 
         self.padding_tuple = (
-            self.spatial_padding_w, self.spatial_padding_w,
-            self.spatial_padding_h, self.spatial_padding_h,
-            self.causal_padding_t, 0  # Only left padding for temporal causality
+            self.spatial_padding_w,
+            self.spatial_padding_w,
+            self.spatial_padding_h,
+            self.spatial_padding_h,
+            self.causal_padding_t,
+            0,  # Only left padding for temporal causality
         )
 
         super().__init__(
@@ -75,10 +78,12 @@ class CausalConv3d(nn.Conv3d):
             padding=0,
             dilation=dilation,
             groups=groups,
-            bias=bias
+            bias=bias,
         )
 
-    def forward(self, x: torch.Tensor, cache_input: Optional[Union[CacheState, torch.Tensor]] = None) -> torch.Tensor: # type: ignore
+    def forward(
+        self, x: torch.Tensor, cache_input: Optional[Union[CacheState, torch.Tensor]] = None
+    ) -> torch.Tensor:  # type: ignore
         if cache_input is None or self.causal_padding_t == 0:
             return super().forward(F.pad(x, self.padding_tuple))
 
@@ -90,7 +95,9 @@ class CausalConv3d(nn.Conv3d):
             if cache_tensor is not None and self.causal_padding_t > 0:
                 cache_tensor = cache_tensor.to(x.device)
                 x = torch.cat([cache_tensor, x], dim=2)
-                padding_to_apply[T_LEFT_INDEX] = max(0, self.causal_padding_t - cache_tensor.shape[2])
+                padding_to_apply[T_LEFT_INDEX] = max(
+                    0, self.causal_padding_t - cache_tensor.shape[2]
+                )
 
             x_padded = F.pad(x, padding_to_apply)
             return super().forward(x_padded)
@@ -99,13 +106,12 @@ class CausalConv3d(nn.Conv3d):
         idx = cache_state.get_and_increment()
         past_cache = cache_state.feat_map[idx]
 
-        new_cache = x[:, :, -self.causal_padding_t:, :, :].clone()
+        new_cache = x[:, :, -self.causal_padding_t :, :, :].clone()
         if new_cache.shape[2] < self.causal_padding_t and past_cache is not None:
             needed = self.causal_padding_t - new_cache.shape[2]
-            new_cache = torch.cat([
-                past_cache[:, :, -needed:, :, :].to(new_cache.device),
-                new_cache
-            ], dim=2)
+            new_cache = torch.cat(
+                [past_cache[:, :, -needed:, :, :].to(new_cache.device), new_cache], dim=2
+            )
 
         cache_state.feat_map[idx] = new_cache
 
@@ -122,6 +128,7 @@ class CausalConv3d(nn.Conv3d):
         x_padded = F.pad(x, padding_to_apply)
         return super().forward(x_padded)
 
+
 class RmsNorm(nn.Module):
     """Root Mean Square normalization with learnable scale and optional bias."""
 
@@ -131,12 +138,13 @@ class RmsNorm(nn.Module):
         self.channel_first = channel_first
         self.scale = dim**0.5
         self.gamma = nn.Parameter(torch.ones(dim))
-        self.bias = nn.Parameter(torch.zeros(dim)) if bias else 0.
+        self.bias = nn.Parameter(torch.zeros(dim)) if bias else 0.0
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         norm_dim = 1 if self.channel_first else -1
-        assert x.shape[norm_dim] == self.dim, \
-            f"Input dim {x.shape[norm_dim]} != expected {self.dim}"
+        assert (
+            x.shape[norm_dim] == self.dim
+        ), f"Input dim {x.shape[norm_dim]} != expected {self.dim}"
 
         x_norm = F.normalize(x, dim=norm_dim) * self.scale
 
@@ -153,8 +161,10 @@ class RmsNorm(nn.Module):
         return x_norm * gamma_to_apply + bias_to_apply
 
     def __repr__(self):
-        return (f"RmsNorm(dim={self.dim}, channel_first={self.channel_first}, "
-                f"bias={isinstance(self.bias, nn.Parameter)})")
+        return (
+            f"RmsNorm(dim={self.dim}, channel_first={self.channel_first}, "
+            f"bias={isinstance(self.bias, nn.Parameter)})"
+        )
 
 
 class ResidualBlock(nn.Module):
@@ -174,8 +184,9 @@ class ResidualBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.conv2 = CausalConv3d(out_dim, out_dim, kernel_size=3, padding=1)
 
-        self.shortcut = CausalConv3d(in_dim, out_dim, kernel_size=1) \
-            if in_dim != out_dim else nn.Identity()
+        self.shortcut = (
+            CausalConv3d(in_dim, out_dim, kernel_size=1) if in_dim != out_dim else nn.Identity()
+        )
 
     def forward(self, x: torch.Tensor, cache_state: Optional[CacheState] = None) -> torch.Tensor:
         h = self.shortcut(x)
@@ -190,6 +201,7 @@ class ResidualBlock(nn.Module):
         x = self.conv2(x, cache_state)
 
         return h + x
+
 
 class SpatialAttentionBlock(nn.Module):
     """Spatial self-attention applied independently per frame."""
@@ -207,62 +219,60 @@ class SpatialAttentionBlock(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         res = x
         b, c, t, h, w = x.shape
-        x = rearrange(x, 'b c t h w -> (b t) c h w')
+        x = rearrange(x, "b c t h w -> (b t) c h w")
         x = self.norm(x)
 
-        qkv = rearrange(self.to_qkv(x), 'bt c3 h w -> bt 1 (h w) c3')
+        qkv = rearrange(self.to_qkv(x), "bt c3 h w -> bt 1 (h w) c3")
         q, k, v = qkv.chunk(3, dim=-1)
 
         x = F.scaled_dot_product_attention(q, k, v)
-        x = rearrange(x, 'bt 1 (h w) c -> bt c h w', h=h, w=w)
+        x = rearrange(x, "bt 1 (h w) c -> bt c h w", h=h, w=w)
 
         x = self.proj_out(x)
-        x = rearrange(x, '(b t) c h w -> b c t h w', b=b, t=t)
+        x = rearrange(x, "(b t) c h w -> b c t h w", b=b, t=t)
         return res + x
+
 
 class Upsample(nn.Upsample):
     """Upsample with bfloat16 support fix."""
 
-    def forward(self, x): # type: ignore
+    def forward(self, x):  # type: ignore
         return super().forward(x.float()).type_as(x)
+
 
 class Resample(nn.Module):
     """Spatial or spatiotemporal upsampling with optional temporal interpolation."""
 
-    def __init__(self, dim: int, mode: str = 'upsample3d'):
-        assert mode in ['upsample2d', 'upsample3d'], \
-            f"Unsupported resample mode: {mode}"
+    def __init__(self, dim: int, mode: str = "upsample3d"):
+        assert mode in ["upsample2d", "upsample3d"], f"Unsupported resample mode: {mode}"
         super().__init__()
         self.dim = dim
         self.mode = mode
 
-        if mode == 'upsample2d':
+        if mode == "upsample2d":
             self.resample = nn.Sequential(
-                Upsample(scale_factor=(2., 2.), mode='nearest'),
-                nn.Conv2d(dim, dim//2, kernel_size=3, padding=1)
+                Upsample(scale_factor=(2.0, 2.0), mode="nearest"),
+                nn.Conv2d(dim, dim // 2, kernel_size=3, padding=1),
             )
-        elif mode == 'upsample3d':
+        elif mode == "upsample3d":
             self.resample = nn.Sequential(
-                Upsample(scale_factor=(2., 2.), mode='nearest'),
-                nn.Conv2d(dim, dim//2, kernel_size=3, padding=1)
+                Upsample(scale_factor=(2.0, 2.0), mode="nearest"),
+                nn.Conv2d(dim, dim // 2, kernel_size=3, padding=1),
             )
-            self.time_conv = CausalConv3d(
-                dim, dim * 2, (3, 1, 1), padding=(1, 0, 0))
+            self.time_conv = CausalConv3d(dim, dim * 2, (3, 1, 1), padding=(1, 0, 0))
 
             # Stream state: 0=first frame, 1=second frame, 2=running
-            self.register_buffer(
-                'stream_state', torch.tensor(0, dtype=torch.int)
-            )
+            self.register_buffer("stream_state", torch.tensor(0, dtype=torch.int))
 
     def forward(self, x: torch.Tensor, cache_state: Optional[CacheState] = None) -> torch.Tensor:
         b, c, t, h, w = x.shape
 
-        if self.mode == 'upsample2d':
-            x = rearrange(x, 'b c t h w -> (b t) c h w')
+        if self.mode == "upsample2d":
+            x = rearrange(x, "b c t h w -> (b t) c h w")
             x = self.resample(x)
-            x = rearrange(x, '(b t) c h w -> b c t h w', t=t)
+            x = rearrange(x, "(b t) c h w -> b c t h w", t=t)
             return x
-        elif self.mode == 'upsample3d':
+        elif self.mode == "upsample3d":
             if cache_state is not None:
                 idx = cache_state.idx
                 past_cache = cache_state.feat_map[idx]
@@ -270,25 +280,26 @@ class Resample(nn.Module):
                 new_cache = x[:, :, -CACHE_T:, :, :].clone()
                 if new_cache.shape[2] < CACHE_T:
                     if self.stream_state == 0:
-                        new_cache = torch.cat([
-                            torch.zeros_like(new_cache).to(new_cache.device), new_cache
-                        ], dim=2)
+                        new_cache = torch.cat(
+                            [torch.zeros_like(new_cache).to(new_cache.device), new_cache], dim=2
+                        )
                     elif self.stream_state == 1:
-                        new_cache = torch.cat([
-                            torch.zeros_like(new_cache).to(new_cache.device),
-                            new_cache
-                        ], dim=2)
+                        new_cache = torch.cat(
+                            [torch.zeros_like(new_cache).to(new_cache.device), new_cache], dim=2
+                        )
                     else:  # stream_state >= 2
                         if past_cache is not None:
-                            new_cache = torch.cat([
-                                past_cache[:, :, -1, :, :].unsqueeze(2).to(new_cache.device),
-                                new_cache
-                            ], dim=2)
+                            new_cache = torch.cat(
+                                [
+                                    past_cache[:, :, -1, :, :].unsqueeze(2).to(new_cache.device),
+                                    new_cache,
+                                ],
+                                dim=2,
+                            )
                         else:
-                            new_cache = torch.cat([
-                                torch.zeros_like(new_cache).to(new_cache.device),
-                                new_cache
-                            ], dim=2)
+                            new_cache = torch.cat(
+                                [torch.zeros_like(new_cache).to(new_cache.device), new_cache], dim=2
+                            )
 
                 cache_state.feat_map[idx] = new_cache
 
@@ -303,13 +314,14 @@ class Resample(nn.Module):
                         x = self.time_conv(x, past_cache)
 
                     cache_state.increment_index()
-                    x = rearrange(x, 'b (n c) t h w -> b c (t n) h w', n=2)
+                    x = rearrange(x, "b (n c) t h w -> b c (t n) h w", n=2)
 
             t = x.shape[2]
-        x = rearrange(x, 'b c t h w -> (b t) c h w')
+        x = rearrange(x, "b c t h w -> (b t) c h w")
         x = self.resample(x)
-        x = rearrange(x, '(b t) c h w -> b c t h w', t=t)
+        x = rearrange(x, "(b t) c h w -> b c t h w", t=t)
         return x
+
 
 class VaeDecoder3d(nn.Module):
     """3D VAE decoder with causal convolutions for streaming video generation."""
@@ -318,12 +330,18 @@ class VaeDecoder3d(nn.Module):
         self,
         dim: int = 128,
         z_dim: int = 4,
-        dim_mult: List[int] = [1, 2, 4, 4],
+        dim_mult: List[int] = None,
         num_res_blocks: int = 2,
-        attn_scales: List[float] = [],
-        temporal_upsample: List[bool] = [False, True, True],
-        dropout: float = 0.0
+        attn_scales: List[float] = None,
+        temporal_upsample: List[bool] = None,
+        dropout: float = 0.0,
     ):
+        if temporal_upsample is None:
+            temporal_upsample = [False, True, True]
+        if attn_scales is None:
+            attn_scales = []
+        if dim_mult is None:
+            dim_mult = [1, 2, 4, 4]
         super().__init__()
         self.dim = dim
         self.z_dim = z_dim
@@ -337,11 +355,13 @@ class VaeDecoder3d(nn.Module):
 
         self.conv1 = CausalConv3d(z_dim, dims[0], 3, padding=1)
 
-        self.middle = nn.ModuleList([
-            ResidualBlock(dims[0], dims[0], dropout),
-            SpatialAttentionBlock(dims[0]),
-            ResidualBlock(dims[0], dims[0], dropout)
-        ])
+        self.middle = nn.ModuleList(
+            [
+                ResidualBlock(dims[0], dims[0], dropout),
+                SpatialAttentionBlock(dims[0]),
+                ResidualBlock(dims[0], dims[0], dropout),
+            ]
+        )
 
         self.upsamples = nn.ModuleList()
         for i, (in_dim, out_dim) in enumerate(zip(dims[:-1], dims[1:])):
@@ -354,7 +374,7 @@ class VaeDecoder3d(nn.Module):
                 in_dim = out_dim
 
             if i != len(dim_mult) - 1:
-                mode = 'upsample3d' if temporal_upsample[i] else 'upsample2d'
+                mode = "upsample3d" if temporal_upsample[i] else "upsample2d"
                 self.upsamples.append(Resample(out_dim, mode=mode))
                 scale *= 2.0
 
@@ -362,7 +382,9 @@ class VaeDecoder3d(nn.Module):
         self.head_silu = nn.SiLU()
         self.head_conv = CausalConv3d(dims[-1], 3, 3, padding=1)
 
-    def forward(self, x: torch.Tensor, cache_states: Optional[List[CacheState]] = None) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, cache_states: Optional[List[CacheState]] = None
+    ) -> torch.Tensor:
         """
         Forward pass with optional caching for streaming inference.
 

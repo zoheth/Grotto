@@ -1,7 +1,8 @@
-from einops import rearrange
 import flashinfer
 import torch
 import torch.nn as nn
+from einops import rearrange
+
 
 def _flash_attention(q, k, v, causal=False, window_size=(-1, -1)):
     """
@@ -35,6 +36,7 @@ def _flash_attention(q, k, v, causal=False, window_size=(-1, -1)):
 
     return torch.stack(outputs, dim=0)
 
+
 class I2VCrossAttention(nn.Module):
     """
     Cross-attention for image-to-video with internal KV caching.
@@ -63,7 +65,7 @@ class I2VCrossAttention(nn.Module):
         """Clear cache for new sequence."""
         self._kv_cache = None
 
-    def forward(self, x:torch.Tensor, context:torch.Tensor):
+    def forward(self, x: torch.Tensor, context: torch.Tensor):
         """
         Args:
             x: [B, L_q, C] - Video latents
@@ -75,22 +77,22 @@ class I2VCrossAttention(nn.Module):
         H = self.num_heads
 
         q = self.norm_q(self.q(x))
-        q = rearrange(q, 'b l (h d) -> b l h d', h=H)
+        q = rearrange(q, "b l (h d) -> b l h d", h=H)
 
         # Key/Value (cached after first forward)
         if self._kv_cache is None:
             k = self.norm_k(self.k(context))
             v = self.v(context)
-            
-            k = rearrange(k, 'b l (h d) -> b l h d', h=H)
-            v = rearrange(v, 'b l (h d) -> b l h d', h=H)
-            
+
+            k = rearrange(k, "b l (h d) -> b l h d", h=H)
+            v = rearrange(v, "b l (h d) -> b l h d", h=H)
+
             self._kv_cache = (k, v)
         else:
             k, v = self._kv_cache
 
         out = _flash_attention(q, k, v)
 
-        out = rearrange(out, 'b l h d -> b l (h d)')
+        out = rearrange(out, "b l h d -> b l (h d)")
 
         return self.o(out.flatten(2))

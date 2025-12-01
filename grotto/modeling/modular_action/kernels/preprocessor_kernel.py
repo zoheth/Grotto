@@ -2,31 +2,39 @@ import torch
 import triton
 import triton.language as tl
 
+
 @triton.jit
 def mouse_preprocessor_kernel(
     # Pointers
     HIDDEN_STATES_PTR,
     MOUSE_CONDITION_PTR,  # Original unpadded mouse_condition
     FUSED_PTR,
-
     # Shapes
-    B, T_q, S, C_hidden,  # B, T*S, C -> reshaped as (B, T, S, C)
-    N_frames, C_mouse,  # Original N_frames (no padding)
-
+    B,
+    T_q,
+    S,
+    C_hidden,  # B, T*S, C -> reshaped as (B, T, S, C)
+    N_frames,
+    C_mouse,  # Original N_frames (no padding)
     # Strides
-    stride_hidden_b, stride_hidden_ts, stride_hidden_c,
-    stride_mouse_b, stride_mouse_t, stride_mouse_c,
-    stride_fused_b, stride_fused_s, stride_fused_t, stride_fused_c,
-
+    stride_hidden_b,
+    stride_hidden_ts,
+    stride_hidden_c,
+    stride_mouse_b,
+    stride_mouse_t,
+    stride_mouse_c,
+    stride_fused_b,
+    stride_fused_s,
+    stride_fused_t,
+    stride_fused_c,
     # Preprocessing Params
     V,  # vae_time_compression_ratio
     W,  # windows_size
     T_OFFSET,
-
     # Constexprs for block sizes (Triton 性能调优的关键)
     BLOCK_C_HIDDEN: tl.constexpr,
     BLOCK_C_MOUSE: tl.constexpr,
-    PAD_T: tl.constexpr  # pad_t = V * W
+    PAD_T: tl.constexpr,  # pad_t = V * W
 ):
     """
     Triton kernel to fuse mouse preprocessing.
@@ -40,9 +48,9 @@ def mouse_preprocessor_kernel(
     where padding is the first frame replicated pad_t times.
     """
     # 1. Get Program IDs (Grid indices)
-    pid_b = tl.program_id(axis=0)    # Index for B dimension
-    pid_s = tl.program_id(axis=1)    # Index for S dimension
-    pid_t_local = tl.program_id(axis=2)   # Index for T_q dimension
+    pid_b = tl.program_id(axis=0)  # Index for B dimension
+    pid_s = tl.program_id(axis=1)  # Index for S dimension
+    pid_t_local = tl.program_id(axis=2)  # Index for T_q dimension
 
     pid_t_global = pid_t_local + T_OFFSET
 
@@ -125,6 +133,7 @@ def mouse_preprocessor_kernel(
         mouse_vec = tl.load(mouse_in_ptr, mask=c_mouse_mask)
         tl.store(fused_out_mouse_ptr, mouse_vec, mask=c_mouse_mask)
 
+
 def mouse_preprocessor_triton(
     hidden_states: torch.Tensor,
     mouse_condition: torch.Tensor,
@@ -132,7 +141,7 @@ def mouse_preprocessor_triton(
     vae_time_compression_ratio: int,
     windows_size: int,
     is_causal: bool = False,
-    num_frame_per_block: int = -1
+    num_frame_per_block: int = -1,
 ) -> torch.Tensor:
     """
     Optimized version that accepts B (T*S) C layout directly.
@@ -150,7 +159,7 @@ def mouse_preprocessor_triton(
         # print(f"[DEBUG] Making hidden_states contiguous...")
         hidden_states = hidden_states.contiguous()
     if not mouse_condition.is_contiguous():
-        print(f"[DEBUG] Making mouse_condition contiguous...")
+        print("[DEBUG] Making mouse_condition contiguous...")
         mouse_condition = mouse_condition.contiguous()
 
     B, T_S, C_hidden = hidden_states.shape
@@ -187,21 +196,27 @@ def mouse_preprocessor_triton(
         hidden_states,
         mouse_condition,
         fused,
-
-        B, T_q, S, C_hidden,
-        N_frames, C_mouse,
-
-        hidden_states.stride(0), hidden_states.stride(1), hidden_states.stride(2),
-        mouse_condition.stride(0), mouse_condition.stride(1), mouse_condition.stride(2),
-        fused.stride(0), fused.stride(1), fused.stride(2), fused.stride(3),
-
+        B,
+        T_q,
+        S,
+        C_hidden,
+        N_frames,
+        C_mouse,
+        hidden_states.stride(0),
+        hidden_states.stride(1),
+        hidden_states.stride(2),
+        mouse_condition.stride(0),
+        mouse_condition.stride(1),
+        mouse_condition.stride(2),
+        fused.stride(0),
+        fused.stride(1),
+        fused.stride(2),
+        fused.stride(3),
         V,
         W,
-
         t_offset,
-
-        BLOCK_C_HIDDEN = BLOCK_C_HIDDEN,
-        BLOCK_C_MOUSE = BLOCK_C_MOUSE,
-        PAD_T = pad_t
+        BLOCK_C_HIDDEN=BLOCK_C_HIDDEN,
+        BLOCK_C_MOUSE=BLOCK_C_MOUSE,
+        PAD_T=pad_t,
     )
     return fused

@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 from torch import nn
@@ -9,8 +9,10 @@ if TYPE_CHECKING:
 
 import flashinfer
 
+
 class ActionInjector(nn.Module, ABC):
     """Base class for action condition injectors."""
+
     @abstractmethod
     def forward(
         self,
@@ -26,7 +28,6 @@ class ActionInjector(nn.Module, ABC):
         pass
 
 
-
 class AttentionKernel(nn.Module):
     """
     FlashInfer-based attention implementation with integrated RoPE support.
@@ -36,7 +37,9 @@ class AttentionKernel(nn.Module):
     2. Accept pre-rotated Q/K tensors (backward compatible)
     """
 
-    def __init__(self, rope_scale: float = 1.0, rope_theta: float = 10000.0, interleave: bool = False):
+    def __init__(
+        self, rope_scale: float = 1.0, rope_theta: float = 10000.0, interleave: bool = False
+    ):
         super().__init__()
         # Wrapper for batch prefill (created lazily on first use)
         self._batch_wrapper = None
@@ -48,10 +51,7 @@ class AttentionKernel(nn.Module):
         self.interleave = interleave
 
     def _apply_rope_internal(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        rope_offset: int = 0
+        self, q: torch.Tensor, k: torch.Tensor, rope_offset: int = 0
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Apply RoPE using FlashInfer's efficient kernel.
@@ -71,7 +71,9 @@ class AttentionKernel(nn.Module):
         BS_q, seq_len_q, num_heads, head_dim = q.shape
         BS_k, seq_len_k, _, _ = k.shape
 
-        assert BS_q == BS_k, f"Q and K must have same batch size for joint RoPE application. Got {BS_q} vs {BS_k}"
+        assert (
+            BS_q == BS_k
+        ), f"Q and K must have same batch size for joint RoPE application. Got {BS_q} vs {BS_k}"
 
         # Flatten to ragged format: [BS, L, H, D] -> [BS*L, H, D]
         q_ragged = q.reshape(BS_q * seq_len_q, num_heads, head_dim)
@@ -79,15 +81,15 @@ class AttentionKernel(nn.Module):
 
         # Create ragged tensor indices for RoPE
         indptr = torch.arange(
-            0, (BS_q + 1) * seq_len_q, seq_len_q,
-            dtype=torch.int32, device=q.device
+            0, (BS_q + 1) * seq_len_q, seq_len_q, dtype=torch.int32, device=q.device
         )
         # Position offsets for each sequence in the batch
         offsets = torch.full((BS_q,), rope_offset, dtype=torch.int32, device=q.device)
 
         # Apply RoPE using flashinfer's efficient kernel
         q_ragged, k_ragged = flashinfer.rope.apply_rope(  # type: ignore
-            q_ragged, k_ragged,
+            q_ragged,
+            k_ragged,
             indptr=indptr,
             offsets=offsets,
             interleave=self.interleave,
@@ -101,11 +103,7 @@ class AttentionKernel(nn.Module):
 
         return q_rope, k_rope
 
-    def _apply_rope_single(
-        self,
-        x: torch.Tensor,
-        rope_offset: int = 0
-    ) -> torch.Tensor:
+    def _apply_rope_single(self, x: torch.Tensor, rope_offset: int = 0) -> torch.Tensor:
         """
         Apply RoPE to a single tensor using FlashInfer's efficient kernel.
 
@@ -125,17 +123,15 @@ class AttentionKernel(nn.Module):
         x_ragged = x.reshape(BS * seq_len, num_heads, head_dim)
 
         # Create ragged tensor indices for RoPE
-        indptr = torch.arange(
-            0, (BS + 1) * seq_len, seq_len,
-            dtype=torch.int32, device=x.device
-        )
+        indptr = torch.arange(0, (BS + 1) * seq_len, seq_len, dtype=torch.int32, device=x.device)
         # Position offsets for each sequence in the batch
         offsets = torch.full((BS,), rope_offset, dtype=torch.int32, device=x.device)
 
         # Apply RoPE using flashinfer's efficient kernel
         # When we only have one tensor, we pass it as both q and k, but only use the first output
         x_ragged, _ = flashinfer.rope.apply_rope(  # type: ignore
-            x_ragged, x_ragged,
+            x_ragged,
+            x_ragged,
             indptr=indptr,
             offsets=offsets,
             interleave=self.interleave,
@@ -200,7 +196,9 @@ class AttentionKernel(nn.Module):
             v_single = v.squeeze(0)  # [seq_len_kv, num_heads, head_dim]
 
             output = flashinfer.single_prefill_with_kv_cache(
-                q_single, k_single, v_single,
+                q_single,
+                k_single,
+                v_single,
                 causal=causal,
                 use_fp16_qk_reduction=False,
             )
@@ -232,12 +230,10 @@ class AttentionKernel(nn.Module):
             # Create ragged tensor indices: qo_indptr and kv_indptr
             # Both [BS+1], marking start/end positions of each sequence
             qo_indptr = torch.arange(
-                0, (BS + 1) * seq_len_q, seq_len_q,
-                dtype=torch.int32, device=q.device
+                0, (BS + 1) * seq_len_q, seq_len_q, dtype=torch.int32, device=q.device
             )
             kv_indptr = torch.arange(
-                0, (BS + 1) * seq_len_kv, seq_len_kv,
-                dtype=torch.int32, device=k.device
+                0, (BS + 1) * seq_len_kv, seq_len_kv, dtype=torch.int32, device=k.device
             )
 
             # Initialize wrapper if needed (allocate workspace buffer)

@@ -9,14 +9,14 @@ Terminology:
     Input sources: Keyboard (WASD), gamepad left stick, etc.
 """
 
-from typing import Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
-from torch import nn
 from einops import rearrange
+from torch import nn
 
-from grotto.modeling.modular_action.interfaces import ActionInjector, AttentionKernel
 from grotto.modeling.modular_action.action_config import ActionConfig
+from grotto.modeling.modular_action.interfaces import ActionInjector, AttentionKernel
 
 if TYPE_CHECKING:
     from ..ring_buffer_cache import RingBufferActionCache
@@ -30,8 +30,13 @@ class MovementPreprocessor(nn.Module):
     using a sliding window to capture temporal patterns.
     """
 
-    def __init__(self, vae_time_compression_ratio: int, windows_size: int,
-                 movement_dim_in: int, hidden_size: int):
+    def __init__(
+        self,
+        vae_time_compression_ratio: int,
+        windows_size: int,
+        movement_dim_in: int,
+        hidden_size: int,
+    ):
         super().__init__()
         self.vae_time_compression_ratio = vae_time_compression_ratio
         self.windows_size = windows_size
@@ -74,11 +79,19 @@ class MovementPreprocessor(nn.Module):
         # Extract windows
         if is_causal:
             N_feats = (N_frames - 1) // self.vae_time_compression_ratio + 1
-            start_idx = self.vae_time_compression_ratio * (N_feats - num_frame_per_block - self.windows_size) + pad_t
+            start_idx = (
+                self.vae_time_compression_ratio
+                * (N_feats - num_frame_per_block - self.windows_size)
+                + pad_t
+            )
             movement_condition_embedded = movement_condition_embedded[:, start_idx:, :]
             group_movement = [
                 movement_condition_embedded[
-                    :, self.vae_time_compression_ratio * (i - self.windows_size) + pad_t : i * self.vae_time_compression_ratio + pad_t, :
+                    :,
+                    self.vae_time_compression_ratio * (i - self.windows_size) + pad_t : i
+                    * self.vae_time_compression_ratio
+                    + pad_t,
+                    :,
                 ]
                 for i in range(num_frame_per_block)
             ]
@@ -86,7 +99,11 @@ class MovementPreprocessor(nn.Module):
             N_feats = (N_frames - 1) // self.vae_time_compression_ratio + 1
             group_movement = [
                 movement_condition_embedded[
-                    :, self.vae_time_compression_ratio * (i - self.windows_size) + pad_t : i * self.vae_time_compression_ratio + pad_t, :
+                    :,
+                    self.vae_time_compression_ratio * (i - self.windows_size) + pad_t : i
+                    * self.vae_time_compression_ratio
+                    + pad_t,
+                    :,
                 ]
                 for i in range(N_feats)
             ]
@@ -252,7 +269,7 @@ class MovementInjector(ActionInjector):
             # Note: Currently assumes B*S = 1, so we take [0] slice
             k_window, v_window, kv_mask = kv_cache.update_and_get_window(
                 k=k_rope_for_cache[0:1],  # [1, T_k, H, D]
-                v=v_for_cache[0:1],       # [1, T_k, H, D]
+                v=v_for_cache[0:1],  # [1, T_k, H, D]
                 num_new_tokens=T_k,
                 max_attention_size=self.max_attention_size,
             )
@@ -262,15 +279,27 @@ class MovementInjector(ActionInjector):
             v_window = v_window.expand(B * S, -1, -1, -1)
 
             # Compute attention with cached KV (RoPE already applied, pass mask for padding handling)
-            attn_output = self.attn_core(q_rope, k_window, v_window, causal=False, use_rope=False, kv_mask=kv_mask)
+            attn_output = self.attn_core(
+                q_rope, k_window, v_window, causal=False, use_rope=False, kv_mask=kv_mask
+            )
         else:
             # Regular cross-attention
             # Expand K, V to match spatial dimension: [B, T_k, H, D] -> [B*S, T_k, H, D]
-            k_rope_expanded = k_rope.unsqueeze(1).expand(-1, S, -1, -1, -1).reshape(B * S, -1, k_rope.shape[-2], k_rope.shape[-1])
-            v_expanded = v.unsqueeze(1).expand(-1, S, -1, -1, -1).reshape(B * S, -1, v.shape[-2], v.shape[-1])
+            k_rope_expanded = (
+                k_rope.unsqueeze(1)
+                .expand(-1, S, -1, -1, -1)
+                .reshape(B * S, -1, k_rope.shape[-2], k_rope.shape[-1])
+            )
+            v_expanded = (
+                v.unsqueeze(1)
+                .expand(-1, S, -1, -1, -1)
+                .reshape(B * S, -1, v.shape[-2], v.shape[-1])
+            )
 
             # Compute cross-attention (RoPE already applied)
-            attn_output = self.attn_core(q_rope, k_rope_expanded, v_expanded, causal=False, use_rope=False)
+            attn_output = self.attn_core(
+                q_rope, k_rope_expanded, v_expanded, causal=False, use_rope=False
+            )
 
         # Reshape and project: [B*S, T, H, D] -> [B, T*S, C_img]
         attn_output = rearrange(attn_output, "(B S) T H D -> B (T S) (H D)", B=B, S=S)

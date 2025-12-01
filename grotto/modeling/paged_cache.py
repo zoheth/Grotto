@@ -1,19 +1,20 @@
 import math
-import torch
 from typing import Optional, Tuple
 
+import torch
 from flashinfer import BatchPrefillWithPagedKVCacheWrapper
+
 
 class PagedCache:
     def __init__(
-            self,
-            max_total_tokens: int,
-            page_size: int,
-            num_heads: int,
-            head_dim: int,
-            sink_size: int = 0,
-            dtype: torch.dtype = torch.bfloat16,
-            device: torch.device = "cuda" # type: ignore
+        self,
+        max_total_tokens: int,
+        page_size: int,
+        num_heads: int,
+        head_dim: int,
+        sink_size: int = 0,
+        dtype: torch.dtype = torch.bfloat16,
+        device: torch.device = "cuda",  # type: ignore
     ):
         self.page_size = page_size
         self.sink_size = sink_size
@@ -28,14 +29,10 @@ class PagedCache:
         # Pre-allocate cache tensors
         # Shape: [max_pages, page_size, num_heads, head_dim]
         self.k_cache = torch.zeros(
-            (self.max_pages, page_size, num_heads, head_dim),
-            dtype=dtype,
-            device=device
+            (self.max_pages, page_size, num_heads, head_dim), dtype=dtype, device=device
         )
         self.v_cache = torch.zeros(
-            (self.max_pages, page_size, num_heads, head_dim),
-            dtype=dtype,
-            device=device
+            (self.max_pages, page_size, num_heads, head_dim), dtype=dtype, device=device
         )
 
         # Page management
@@ -66,7 +63,7 @@ class PagedCache:
     def _allocate_page(self) -> int:
         if self.free_page_pool:
             return self.free_page_pool.pop()
-        
+
         # Allocate new page
         if self.next_free_page_id >= self.max_pages:
             raise RuntimeError(
@@ -80,9 +77,7 @@ class PagedCache:
         self.next_free_page_id += 1
         return page_id
 
-
     def append(self, k: torch.Tensor, v: torch.Tensor):
-        
         incoming_len = k.shape[0]
 
         incoming_processed = 0
@@ -100,14 +95,12 @@ class PagedCache:
 
             # Write to cache
             self.k_cache[
-                current_page_id,
-                self.current_page_offset:self.current_page_offset + to_write
-            ] = k[incoming_processed:incoming_processed + to_write]
+                current_page_id, self.current_page_offset : self.current_page_offset + to_write
+            ] = k[incoming_processed : incoming_processed + to_write]
 
             self.v_cache[
-                current_page_id,
-                self.current_page_offset:self.current_page_offset + to_write
-            ] = v[incoming_processed:incoming_processed + to_write]
+                current_page_id, self.current_page_offset : self.current_page_offset + to_write
+            ] = v[incoming_processed : incoming_processed + to_write]
 
             self.current_page_offset += to_write
             incoming_processed += to_write
@@ -116,12 +109,7 @@ class PagedCache:
         self.seq_len += incoming_len
         self.global_position += incoming_len
 
-    def update_or_append(
-        self,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        current_end: int
-    ) -> None:
+    def update_or_append(self, k: torch.Tensor, v: torch.Tensor, current_end: int) -> None:
         incoming_len = k.shape[0]
 
         if current_end <= self.global_end_index:
@@ -132,7 +120,7 @@ class PagedCache:
                 self.append(k, v)
                 self.global_end_index = current_end
                 return
-            
+
             # Calculate page and offset for write_start_in_cache
             start_page_idx = write_start_in_cache // self.page_size
             start_offset = write_start_in_cache % self.page_size
@@ -151,15 +139,13 @@ class PagedCache:
                 to_write = min(space_in_page, incoming_len - incoming_processed)
 
                 # Overwrite cache
-                self.k_cache[
-                    page_id,
-                    current_offset:current_offset + to_write
-                ] = k[incoming_processed:incoming_processed + to_write]
+                self.k_cache[page_id, current_offset : current_offset + to_write] = k[
+                    incoming_processed : incoming_processed + to_write
+                ]
 
-                self.v_cache[
-                    page_id,
-                    current_offset:current_offset + to_write
-                ] = v[incoming_processed:incoming_processed + to_write]
+                self.v_cache[page_id, current_offset : current_offset + to_write] = v[
+                    incoming_processed : incoming_processed + to_write
+                ]
 
                 incoming_processed += to_write
                 current_page_idx += 1
@@ -171,11 +157,10 @@ class PagedCache:
             self.append(k, v)
             self.global_end_index = current_end
 
-
     def evict(self, max_allowed_tokens: int) -> int:
         if self.seq_len <= max_allowed_tokens:
             return 0
-        
+
         num_to_remove = self.seq_len - max_allowed_tokens
 
         pages_to_drop = num_to_remove // self.page_size
@@ -188,23 +173,22 @@ class PagedCache:
         max_evictable = len(self.active_page_indices) - sink_pages - 1
         if max_evictable <= 0:
             return 0
-        
+
         if pages_to_drop > 0:
-            evicted_page_ids = self.active_page_indices[sink_pages:sink_pages + pages_to_drop]
+            evicted_page_ids = self.active_page_indices[sink_pages : sink_pages + pages_to_drop]
 
             self.free_page_pool.extend(evicted_page_ids)
 
-            del self.active_page_indices[sink_pages:sink_pages + pages_to_drop]
+            del self.active_page_indices[sink_pages : sink_pages + pages_to_drop]
 
             evicted_tokens = pages_to_drop * self.page_size
             self.seq_len -= evicted_tokens
             return evicted_tokens
-        
+
         return 0
 
     def get_flashinfer_meta(
-        self,
-        device: Optional[torch.device] = None
+        self, device: Optional[torch.device] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Generate FlashInfer paged attention metadata.
@@ -222,28 +206,20 @@ class PagedCache:
             device = self.device
 
         # Page indices for active pages
-        indices = torch.tensor(
-            self.active_page_indices,
-            dtype=torch.int32,
-            device=device
-        )
+        indices = torch.tensor(self.active_page_indices, dtype=torch.int32, device=device)
 
         # Indptr for single batch: [0, num_active_pages]
-        indptr = torch.tensor(
-            [0, len(self.active_page_indices)],
-            dtype=torch.int32,
-            device=device
-        )
+        indptr = torch.tensor([0, len(self.active_page_indices)], dtype=torch.int32, device=device)
 
         # Number of valid tokens in last page
         last_page_len = torch.tensor(
             [self.current_page_offset if self.current_page_offset > 0 else self.page_size],
             dtype=torch.int32,
-            device=device
+            device=device,
         )
 
         return indices, indptr, last_page_len
-    
+
     @property
     def total_tokens(self) -> int:
         """Total number of valid tokens in cache."""
@@ -258,7 +234,8 @@ class PagedCache:
             f"heads={self.num_heads}, "
             f"head_dim={self.head_dim})"
         )
-    
+
+
 class PagedCacheManager:
     """
     Manager for multiple PagedCache instances (one per transformer layer).
@@ -276,7 +253,7 @@ class PagedCacheManager:
         head_dim: int,
         sink_size: int = 0,
         dtype: torch.dtype = torch.bfloat16,
-        device: torch.device = "cuda" # type: ignore
+        device: torch.device = "cuda",  # type: ignore
     ):
         self.num_layers = num_layers
         self.max_total_tokens = max_total_tokens
@@ -296,14 +273,14 @@ class PagedCacheManager:
                 head_dim=head_dim,
                 sink_size=sink_size,
                 dtype=dtype,
-                device=device
+                device=device,
             )
             for _ in range(num_layers)
         ]
 
         # FlashInfer workspace (shared across layers)
         self._workspace_buffer: Optional[torch.Tensor] = None
-        self._prefill_wrapper: Optional["BatchPrefillWithPagedKVCacheWrapper"] = None
+        self._prefill_wrapper: Optional[BatchPrefillWithPagedKVCacheWrapper] = None
 
     def reset(self) -> None:
         for cache in self.caches:
@@ -317,13 +294,13 @@ class PagedCacheManager:
             self._workspace_buffer = torch.empty(
                 128 * 1024 * 1024,  # 128MB workspace
                 dtype=torch.uint8,
-                device=device
+                device=device,
             )
 
         if self._prefill_wrapper is None:
             self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
                 self._workspace_buffer,
-                kv_layout="NHD"  # [num_pages, page_size, num_heads, head_dim]
+                kv_layout="NHD",  # [num_pages, page_size, num_heads, head_dim]
             )
 
     @property

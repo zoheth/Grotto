@@ -1,13 +1,11 @@
 from abc import ABC, abstractmethod
-from typing import Optional, List
+from typing import List, Optional
+
 import torch
 
+
 class DiffusionScheduler(ABC):
-    def __init__(
-        self,
-        num_train_timesteps: int = 1000,
-        num_inference_steps: int = 100
-    ):
+    def __init__(self, num_train_timesteps: int = 1000, num_inference_steps: int = 100):
         self.num_train_timesteps = num_train_timesteps
         self.num_inference_steps = num_inference_steps
 
@@ -17,9 +15,7 @@ class DiffusionScheduler(ABC):
 
     @abstractmethod
     def set_timesteps(
-        self,
-        num_inference_steps: Optional[int] = None,
-        denoising_strength: float = 1.0
+        self, num_inference_steps: Optional[int] = None, denoising_strength: float = 1.0
     ) -> None:
         """
         Set the discrete timesteps for inference.
@@ -32,10 +28,7 @@ class DiffusionScheduler(ABC):
 
     @abstractmethod
     def add_noise(
-        self,
-        original_samples: torch.Tensor,
-        noise: torch.Tensor,
-        timestep: torch.Tensor
+        self, original_samples: torch.Tensor, noise: torch.Tensor, timestep: torch.Tensor
     ) -> torch.Tensor:
         """
         Forward diffusion: add noise to clean samples.
@@ -52,11 +45,7 @@ class DiffusionScheduler(ABC):
 
     @abstractmethod
     def step(
-        self,
-        model_output: torch.Tensor,
-        timestep: torch.Tensor,
-        sample: torch.Tensor,
-        **kwargs
+        self, model_output: torch.Tensor, timestep: torch.Tensor, sample: torch.Tensor, **kwargs
     ) -> torch.Tensor:
         """
         Reverse diffusion: single denoising step.
@@ -73,9 +62,7 @@ class DiffusionScheduler(ABC):
         pass
 
     def get_inference_timesteps(
-        self,
-        custom_steps: Optional[List[int]] = None,
-        warp: bool = False
+        self, custom_steps: Optional[List[int]] = None, warp: bool = False
     ) -> torch.Tensor:
         """
         Get timesteps for inference, optionally warped or custom.
@@ -100,13 +87,13 @@ class DiffusionScheduler(ABC):
 
         # Warp timesteps using scheduler's mapping
         # This replaces the _prepare_denoising_steps logic in Pipeline
-        timesteps_extended = torch.cat([
-            self.timesteps.cpu(),
-            torch.tensor([0], dtype=torch.float32)
-        ])
+        timesteps_extended = torch.cat(
+            [self.timesteps.cpu(), torch.tensor([0], dtype=torch.float32)]
+        )
         warped_steps = timesteps_extended[1000 - steps_tensor]
 
         return warped_steps
+
 
 class FlowMatchScheduler(DiffusionScheduler):
     """
@@ -126,7 +113,7 @@ class FlowMatchScheduler(DiffusionScheduler):
         sigma_min: float = 0.003 / 1.002,
         inverse_timesteps: bool = False,
         extra_one_step: bool = False,
-        reverse_sigmas: bool = False
+        reverse_sigmas: bool = False,
     ):
         super().__init__(num_train_timesteps, num_inference_steps)
 
@@ -144,7 +131,7 @@ class FlowMatchScheduler(DiffusionScheduler):
         self,
         num_inference_steps: Optional[int] = None,
         denoising_strength: float = 1.0,
-        training: bool = False
+        training: bool = False,
     ) -> None:
         if num_inference_steps is not None:
             self.num_inference_steps = num_inference_steps
@@ -153,13 +140,11 @@ class FlowMatchScheduler(DiffusionScheduler):
         sigma_start = self.sigma_min + (self.sigma_max - self.sigma_min) * denoising_strength
 
         if self.extra_one_step:
-            self.sigmas = torch.linspace(
-                sigma_start, self.sigma_min, self.num_inference_steps + 1
-            )[:-1]
+            self.sigmas = torch.linspace(sigma_start, self.sigma_min, self.num_inference_steps + 1)[
+                :-1
+            ]
         else:
-            self.sigmas = torch.linspace(
-                sigma_start, self.sigma_min, self.num_inference_steps
-            )
+            self.sigmas = torch.linspace(sigma_start, self.sigma_min, self.num_inference_steps)
 
         # Apply transformations
         if self.inverse_timesteps:
@@ -172,7 +157,7 @@ class FlowMatchScheduler(DiffusionScheduler):
             self.sigmas = 1 - self.sigmas
 
         # Map to discrete timesteps
-        self.timesteps = self.sigmas * self.num_train_timesteps # type: ignore
+        self.timesteps = self.sigmas * self.num_train_timesteps  # type: ignore
 
         # Compute training weights if needed
         if training:
@@ -181,7 +166,9 @@ class FlowMatchScheduler(DiffusionScheduler):
             y_shifted = y - y.min()
             self.training_weights = y_shifted * (self.num_inference_steps / y_shifted.sum())
 
-    def add_noise(self, original_samples: torch.Tensor, noise: torch.Tensor, timestep: torch.Tensor) -> torch.Tensor:
+    def add_noise(
+        self, original_samples: torch.Tensor, noise: torch.Tensor, timestep: torch.Tensor
+    ) -> torch.Tensor:
         """
         Add noise according to flow matching schedule.
 
@@ -198,36 +185,34 @@ class FlowMatchScheduler(DiffusionScheduler):
         if timestep.ndim == 2:
             timestep = timestep.flatten(0, 1)
 
-        self.sigmas = self.sigmas.to(noise.device) # type: ignore
-        self.timesteps = self.timesteps.to(noise.device) # type: ignore
+        self.sigmas = self.sigmas.to(noise.device)  # type: ignore
+        self.timesteps = self.timesteps.to(noise.device)  # type: ignore
 
         # Find sigma for each sample
         timestep_id = torch.argmin(
-            (self.timesteps.unsqueeze(0) - timestep.unsqueeze(1)).abs(),
-            dim=1
+            (self.timesteps.unsqueeze(0) - timestep.unsqueeze(1)).abs(), dim=1
         )
         sigma = self.sigmas[timestep_id].reshape(-1, 1, 1, 1)
 
         noisy_samples = (1 - sigma) * original_samples + sigma * noise
 
         return noisy_samples.type_as(noise)
-    
+
     def step(
         self,
         model_output: torch.Tensor,
         timestep: torch.Tensor,
         sample: torch.Tensor,
-        to_final: bool = False
+        to_final: bool = False,
     ) -> torch.Tensor:
         if timestep.ndim == 2:
             timestep = timestep.flatten(0, 1)
 
-        self.sigmas = self.sigmas.to(model_output.device) # type: ignore
-        self.timesteps = self.timesteps.to(model_output.device) # type: ignore
+        self.sigmas = self.sigmas.to(model_output.device)  # type: ignore
+        self.timesteps = self.timesteps.to(model_output.device)  # type: ignore
 
         timestep_id = torch.argmin(
-            (self.timesteps.unsqueeze(0) - timestep.unsqueeze(1)).abs(),
-            dim=1
+            (self.timesteps.unsqueeze(0) - timestep.unsqueeze(1)).abs(), dim=1
         )
         sigma = self.sigmas[timestep_id].reshape(-1, 1, 1, 1)
 
@@ -239,12 +224,9 @@ class FlowMatchScheduler(DiffusionScheduler):
         prev_sample = sample + (sigma_next - sigma) * model_output
 
         return prev_sample
-    
+
     def convert_flow_to_x0(
-        self,
-        flow_pred: torch.Tensor,
-        xt: torch.Tensor,
-        timestep: torch.Tensor
+        self, flow_pred: torch.Tensor, xt: torch.Tensor, timestep: torch.Tensor
     ) -> torch.Tensor:
         """
         Convert flow prediction to x0 (clean sample) prediction.
@@ -270,10 +252,7 @@ class FlowMatchScheduler(DiffusionScheduler):
         timesteps = self.timesteps.double().to(flow_pred.device)
 
         # Find sigma for timestep
-        timestep_id = torch.argmin(
-            (timesteps.unsqueeze(0) - timestep.unsqueeze(1)).abs(),
-            dim=1
-        )
+        timestep_id = torch.argmin((timesteps.unsqueeze(0) - timestep.unsqueeze(1)).abs(), dim=1)
         sigma_t = sigmas[timestep_id].reshape(-1, 1, 1, 1)
 
         # Derive x0

@@ -12,8 +12,9 @@ Key differences from ActionCache:
 4. No CPU-GPU synchronization (.item() calls) in the forward path
 """
 
+from typing import Optional, Tuple
+
 import torch
-from typing import Tuple, Optional
 
 
 class RingBufferActionCache:
@@ -78,9 +79,7 @@ class RingBufferActionCache:
         self._arange = torch.arange(max_seq_len, device=device, dtype=torch.long)
 
         # Pre-allocate mask tensors (for output)
-        self._attention_mask_buffer = torch.zeros(
-            max_seq_len, dtype=torch.bool, device=device
-        )
+        self._attention_mask_buffer = torch.zeros(max_seq_len, dtype=torch.bool, device=device)
 
         # Pre-allocate scalar tensors for CUDA Graph compatibility
         # These avoid creating new tensors during graph capture
@@ -156,9 +155,7 @@ class RingBufferActionCache:
         # Example: pos_ptr=5, window_len=8, max_seq_len=1024
         # Logical positions: [-3, -2, -1, 0, 1, 2, 3, 4]
         # Physical indices: [1021, 1022, 1023, 0, 1, 2, 3, 4]
-        read_indices = (
-            self.pos_ptr - window_len + self._arange[:window_len]
-        ) % self.max_seq_len
+        read_indices = (self.pos_ptr - window_len + self._arange[:window_len]) % self.max_seq_len
 
         # Gather data from ring buffer to create time-ordered window
         # This is a memory copy but much more predictable than dynamic slicing
@@ -194,10 +191,10 @@ class RingBufferActionCache:
             Dictionary containing cache state
         """
         return {
-            'k_cache': self.k_cache.clone(),
-            'v_cache': self.v_cache.clone(),
-            'pos_ptr': self.pos_ptr.clone(),
-            'total_tokens': self.total_tokens.clone(),
+            "k_cache": self.k_cache.clone(),
+            "v_cache": self.v_cache.clone(),
+            "pos_ptr": self.pos_ptr.clone(),
+            "total_tokens": self.total_tokens.clone(),
         }
 
     def load_state_dict(self, state_dict: dict) -> None:
@@ -207,7 +204,7 @@ class RingBufferActionCache:
         Args:
             state_dict: Dictionary containing cache state
         """
-        self.k_cache.copy_(state_dict['k_cache'])
-        self.v_cache.copy_(state_dict['v_cache'])
-        self.pos_ptr.copy_(state_dict['pos_ptr'])
-        self.total_tokens.copy_(state_dict['total_tokens'])
+        self.k_cache.copy_(state_dict["k_cache"])
+        self.v_cache.copy_(state_dict["v_cache"])
+        self.pos_ptr.copy_(state_dict["pos_ptr"])
+        self.total_tokens.copy_(state_dict["total_tokens"])

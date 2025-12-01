@@ -1,15 +1,12 @@
-from typing import Optional, List, Dict
-from abc import ABC, abstractmethod
+from abc import ABC
+
 import torch
-import copy
 
-from einops import rearrange
-from tqdm import tqdm
-
-from grotto.pipeline.config import PipelineConfig
-from grotto.pipeline.condition_processor import ConditionProcessor
 from grotto.modeling.predictor import WanDiffusionPredictor
+from grotto.pipeline.condition_processor import ConditionProcessor
+from grotto.pipeline.config import PipelineConfig
 from grotto.scheduler import FlowMatchScheduler
+
 
 class BaseCausalInferencePipeline(torch.nn.Module, ABC):
     """
@@ -23,14 +20,14 @@ class BaseCausalInferencePipeline(torch.nn.Module, ABC):
 
     Subclasses implement specific inference modes (batch vs. streaming).
     """
-     
+
     def __init__(
         self,
         config: PipelineConfig,
         predictor: WanDiffusionPredictor,
         vae_decoder,
         device: str = "cuda",
-        page_size: int = 16
+        page_size: int = 16,
     ):
         super().__init__()
         self.config = config
@@ -43,19 +40,17 @@ class BaseCausalInferencePipeline(torch.nn.Module, ABC):
             num_train_timesteps=1000,
             shift=self.config.inference.timestep_shift,
             sigma_min=0.0,
-            extra_one_step=True
+            extra_one_step=True,
         )
         self.scheduler.set_timesteps(num_inference_steps=1000)
 
         self.denoising_step_list = self.scheduler.get_inference_timesteps(
-            custom_steps=config.inference.denoising_steps,
-            warp=config.inference.warp_denoising_step
+            custom_steps=config.inference.denoising_steps, warp=config.inference.warp_denoising_step
         )
 
         self.cache_manager = None
 
-        self.condition_processor = ConditionProcessor(
-            vae_config=config.vae,
-            mode=config.mode
+        self.condition_processor = ConditionProcessor(vae_config=config.vae, mode=config.mode)
+        print(
+            f"Initialized {self.__class__.__name__} with {config.inference.num_frame_per_block} frames per block"
         )
-        print(f"Initialized {self.__class__.__name__} with {config.inference.num_frame_per_block} frames per block")
