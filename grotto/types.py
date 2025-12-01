@@ -11,6 +11,21 @@ import torch
 
 
 @dataclass
+class CameraControlTensors:
+    """Camera control action tensors."""
+
+    translation: torch.Tensor
+    rotation: Optional[torch.Tensor] = None
+
+    def unsqueeze_batch(self, dim: int = 0) -> "CameraControlTensors":
+        """Add batch dimension."""
+        return CameraControlTensors(
+            translation=self.translation.unsqueeze(dim),
+            rotation=self.rotation.unsqueeze(dim) if self.rotation is not None else None,
+        )
+
+
+@dataclass
 class ConditionalInputs:
     """
     Encapsulates all conditional inputs for video generation.

@@ -3,6 +3,8 @@ from typing import Dict, List, Tuple
 
 import torch
 
+from grotto.types import CameraControlTensors
+
 
 @dataclass
 class TranslationMapping:
@@ -126,7 +128,7 @@ class CameraControlSequence:
         for idx in range(start_frame, end_frame):
             self.set_frame(idx, translation, rotation)
 
-    def get_segment(self, start_frame: int, num_frames: int) -> Dict[str, torch.Tensor]:
+    def get_segment(self, start_frame: int, num_frames: int) -> CameraControlTensors:
         """
         Extract control tensors for a segment (for streaming inference).
 
@@ -135,25 +137,25 @@ class CameraControlSequence:
             num_frames: Number of frames to extract
 
         Returns:
-            Dict with 'translation' and optionally 'rotation' tensors
+            CameraControlTensors with translation and optionally rotation
         """
         end = min(start_frame + num_frames, self.total_frames)
 
-        result = {
-            "translation": self._translation[start_frame:end].clone(),
-        }
+        rotation = None
+        if self.config.has_rotation and self._rotation is not None:
+            rotation = self._rotation[start_frame:end].clone()
 
-        if self.config.has_rotation:
-            result["rotation"] = self._rotation[start_frame:end].clone()
+        return CameraControlTensors(
+            translation=self._translation[start_frame:end].clone(),
+            rotation=rotation,
+        )
 
-        return result
-
-    def to_tensors(self) -> Dict[str, torch.Tensor]:
+    def to_tensors(self) -> CameraControlTensors:
         """
         Get all control tensors.
 
         Returns:
-            Dict with 'translation' and optionally 'rotation' tensors
+            CameraControlTensors with translation and optionally rotation
         """
         return self.get_segment(0, self.total_frames)
 
@@ -380,7 +382,7 @@ def generate_camera_navigation(
     total_frames: int = 57,
     num_frames_per_pattern: int = 4,
     config: CameraControlConfig | None = None,
-) -> Dict[str, torch.Tensor]:
+) -> CameraControlTensors:
     """
     Generate random camera navigation sequence (for testing/benchmarking).
 
@@ -392,7 +394,7 @@ def generate_camera_navigation(
         config: Camera control configuration (defaults to STANDARD_CAMERA_CONFIG)
 
     Returns:
-        Dict with 'translation' and 'rotation' tensors
+        CameraControlTensors with translation and rotation
     """
     if config is None:
         config = STANDARD_CAMERA_CONFIG

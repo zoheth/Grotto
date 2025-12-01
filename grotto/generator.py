@@ -158,13 +158,13 @@ class VideoGenerator:
 
         num_video_frames = (num_frames - 1) * 4 + 1
 
-        camera_control = generate_camera_navigation(num_video_frames)
+        camera_control = generate_camera_navigation(num_video_frames).unsqueeze_batch()
 
         conditional_inputs = ConditionalInputs(
             cond_concat=cond_concat,
             visual_context=visual_context,
-            rotation_cond=camera_control["rotation"].unsqueeze(0),
-            translation_cond=camera_control["translation"].unsqueeze(0),
+            rotation_cond=camera_control.rotation,
+            translation_cond=camera_control.translation,
         ).to(device=self.device, dtype=self.weight_dtype)
 
         videos = self.pipeline.inference(
