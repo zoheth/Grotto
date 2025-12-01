@@ -9,10 +9,9 @@ from diffusers.models.modeling_utils import ModelMixin
 from einops import rearrange
 from torch import nn
 
-from grotto.modeling.causal_self_attention import CausalSelfAttention, FlashInferPlanner
+from grotto.modeling.causal_self_attention import CausalSelfAttention
 from grotto.modeling.cross_attention import I2VCrossAttention
 from grotto.modeling.modular_action import ActionConfig, ActionContext, ActionModule
-from grotto.modeling.paged_cache import PagedCache
 from grotto.profiling import record_module
 
 if TYPE_CHECKING:
@@ -105,7 +104,6 @@ class CausalWanAttentionBlock(nn.Module):
         current_start: int = 0,
         cache_start: Optional[int] = None,
         action_context: Optional[ActionContext] = None,
-        planner: Optional[FlashInferPlanner] = None,
     ) -> torch.Tensor:
         r"""
         Forward pass through the attention block.
@@ -117,10 +115,9 @@ class CausalWanAttentionBlock(nn.Module):
             freqs: RoPE frequencies [max_len, head_dim/2]
             context: Visual context for cross-attention
             block_mask: Attention mask for self-attention
-            kv_cache: KV cache for self-attention
+            kv_cache: RingBufferVisualCache for self-attention
             current_start: Current position in sequence (for cache indexing)
             action_context: Optional ActionContext encapsulating all action-related parameters
-            planner: FlashInferPlanner (must be pre-planned before calling)
 
         Returns:
             Updated hidden states [B, L, C]
@@ -146,7 +143,6 @@ class CausalWanAttentionBlock(nn.Module):
                 freqs,
                 kv_cache,
                 current_start,
-                planner,
             )
             x = self._adaln_gated_residual(x, y, gate_msa, f=num_frames)
 
@@ -379,7 +375,7 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
         timesteps: torch.Tensor,
         visual_context,
         cond_concat,
-        kv_cache: List[PagedCache],
+        kv_cache: List,  # List[RingBufferVisualCache]
         action_context: Optional[ActionContext] = None,
         kv_cache_mouse: Optional[List["RingBufferActionCache"]] = None,
         kv_cache_keyboard: Optional[List["RingBufferActionCache"]] = None,
@@ -405,16 +401,6 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
 
         context = self.img_emb(visual_context)
 
-        planner = None
-        first_cache = kv_cache[0]
-
-        head_dim = self.dim // self.num_heads
-        planner = FlashInferPlanner(
-            num_heads=self.num_heads,
-            head_dim=head_dim,
-            page_size=first_cache.page_size,
-        )
-
         for block_index, block in enumerate(self.blocks):
             if action_context is not None:
                 action_context.kv_cache_mouse = (
@@ -433,7 +419,6 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
                 action_context=action_context,
                 kv_cache=kv_cache[block_index],
                 current_start=current_start,
-                planner=planner,
             )
 
         x = self.head(x, e.reshape(*timesteps.shape, 1, -1))

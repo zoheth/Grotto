@@ -27,14 +27,12 @@ class BaseCausalInferencePipeline(torch.nn.Module, ABC):
         predictor: WanDiffusionPredictor,
         vae_decoder,
         device: str = "cuda",
-        page_size: int = 256,
     ):
         super().__init__()
         self.config = config
         self.predictor = predictor
         self.vae_decoder = vae_decoder
         self.device = torch.device(device)
-        self.page_size = page_size
 
         self.scheduler = FlowMatchScheduler(
             num_train_timesteps=1000,

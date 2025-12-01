@@ -18,9 +18,8 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
         predictor,
         vae_decoder,
         device: str = "cuda",
-        page_size: int = 256,
     ):
-        super().__init__(config, predictor, vae_decoder, device, page_size=page_size)
+        super().__init__(config, predictor, vae_decoder, device)
 
     def _ensure_cache_initialized(self, batch_size: int, dtype: torch.dtype):
         if self.cache_manager is None:
@@ -29,7 +28,6 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
                 cache_config=self.config.cache,
                 device=self.device,
                 dtype=dtype,
-                page_size=self.page_size,
             )
             self.cache_manager.initialize_all_caches(batch_size)
         elif not self.cache_manager.is_initialized():
