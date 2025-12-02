@@ -16,6 +16,7 @@ from grotto.profiling import record_module
 
 if TYPE_CHECKING:
     from .ring_buffer_cache import RingBufferActionCache
+    from .ring_buffer_visual_cache import RingBufferVisualCache
 
 
 class SinusoidalEmbedding(nn.Module):
@@ -49,14 +50,15 @@ class CausalWanAttentionBlock(nn.Module):
         dim,
         ffn_dim,
         num_heads,
+        num_frame_per_block,
         local_attn_size=-1,
         sink_size=0,
-        num_frame_per_block=1,
         qk_norm=True,
         cross_attn_norm=False,
         action_config=None,
         block_idx=0,
         eps=1e-6,
+        workspace_buffer: Optional[torch.Tensor] = None,
     ):
         if action_config is None:
             action_config = {}
@@ -82,8 +84,16 @@ class CausalWanAttentionBlock(nn.Module):
         )
 
         self.self_attn = CausalSelfAttention(
-            dim, num_heads, local_attn_size, sink_size, num_frame_per_block, qk_norm, eps
+            dim,
+            num_heads,
+            num_frame_per_block,
+            local_attn_size,
+            sink_size,
+            qk_norm,
+            eps,
+            workspace_buffer=workspace_buffer,
         )
+
         self.cross_attn = I2VCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps)
 
         self.ffn = nn.Sequential(
@@ -100,7 +110,7 @@ class CausalWanAttentionBlock(nn.Module):
         grid_sizes: Tuple[int, int, int],
         freqs: torch.Tensor,
         context: torch.Tensor,
-        kv_cache: Optional[dict] = None,
+        kv_cache: "RingBufferVisualCache",
         current_start: int = 0,
         cache_start: Optional[int] = None,
         action_context: Optional[ActionContext] = None,
@@ -284,7 +294,7 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
         num_layers=30,
         local_attn_size=-1,
         sink_size=0,
-        num_frame_per_block=1,
+        num_frame_per_block=3,
         qk_norm=True,
         cross_attn_norm=True,
         action_config=None,
@@ -322,20 +332,23 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
         )
         self.time_projection = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim * 6))
 
+        self.workspace_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device="cuda")
+
         self.blocks = nn.ModuleList(
             [
                 CausalWanAttentionBlock(
                     dim,
                     ffn_dim,
                     num_heads,
+                    self.num_frame_per_block,
                     local_attn_size,
                     sink_size,
-                    self.num_frame_per_block,
                     qk_norm,
                     cross_attn_norm,
                     action_config=action_config,
                     eps=eps,
                     block_idx=idx,
+                    workspace_buffer=self.workspace_buffer,
                 )
                 for idx in range(num_layers)
             ]

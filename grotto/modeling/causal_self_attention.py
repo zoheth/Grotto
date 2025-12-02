@@ -62,13 +62,14 @@ class CausalSelfAttention(nn.Module):
         self,
         dim: int,
         num_heads: int,
+        num_frame_per_block: int,
         local_attn_size: int = -1,
         sink_size: int = 0,
-        num_frame_per_block: int = 1,
         qk_norm: bool = True,
         eps: float = 1e-6,
         height: int = 22,
         width: int = 40,
+        workspace_buffer: Optional[torch.Tensor] = None,
     ):
         super().__init__()
 
@@ -94,13 +95,22 @@ class CausalSelfAttention(nn.Module):
 
         self.rope_cache: Optional[RoPE3DCache] = None
 
-        workspace_buffer = torch.empty(256 * 1024 * 1024, dtype=torch.uint8, device="cuda")
-        self.flashinfer_wrapper = flashinfer.BatchPrefillWithRaggedKVCacheWrapper(
-            workspace_buffer, "NHD"
-        )
+        if workspace_buffer is None:
+            workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
 
         self.kv_indptr = torch.zeros(2, dtype=torch.int32, device="cuda")
         self.qo_indptr = torch.zeros(2, dtype=torch.int32, device="cuda")
+        q_len = self.frame_seq_len * num_frame_per_block
+        self.qo_indptr[1] = q_len
+
+        self.flashinfer_wrapper = flashinfer.BatchPrefillWithRaggedKVCacheWrapper(
+            workspace_buffer,
+            "NHD",
+        )
+
+        self.register_buffer(
+            "local_indices", torch.arange(q_len, dtype=torch.int32), persistent=False
+        )
 
     def _init_rope_cache(self, freqs: torch.Tensor):
         if self.rope_cache is None:
@@ -130,11 +140,10 @@ class CausalSelfAttention(nn.Module):
         frame_seqlen = height * width
 
         nnz = B * s
+        positions = self.local_indices[:nnz] + current_start  # type: ignore
+
         q_flat = q.view(nnz, n * d)
         k_flat = k.view(nnz, n * d)
-        positions = torch.arange(
-            current_start, current_start + nnz, dtype=torch.int32, device=x.device
-        )
 
         cache = self.rope_cache.get_cache()
 
@@ -178,11 +187,7 @@ class CausalSelfAttention(nn.Module):
                 f"Invalid cache_mode: {cache_mode}. Must be 'read_only' or 'read_write'"
             )
 
-        q_len = x.shape[1]
-
-        self.qo_indptr[1] = q_len
         self.kv_indptr[1] = valid_len_tensor
-
         self.flashinfer_wrapper.begin_forward(
             self.qo_indptr,
             self.kv_indptr,
@@ -194,9 +199,6 @@ class CausalSelfAttention(nn.Module):
         )
 
         q_for_flash = roped_q.squeeze(0)
-        # x = flashinfer.single_prefill_with_kv_cache(
-        #     q_for_flash, k_cache, v_cache, causal=False, kv_layout="NHD"
-        # )
         x = self.flashinfer_wrapper.run(q_for_flash, k_linear, v_linear)
         x = x.unsqueeze(0)
 
