@@ -16,19 +16,13 @@ import torch
 from einops import rearrange
 from torch import nn
 
+from grotto.modeling.attention import AttentionWithCache
 from grotto.modeling.modular_action.action_config import ActionConfig
 from grotto.modeling.modular_action.interfaces import ActionInjector
+from grotto.modeling.rope import RoPE3DCache
 
 if TYPE_CHECKING:
     from ..kv_cache import DualPlaneKVCache
-
-
-class RoPE3DCache:
-    def __init__(self, freqs_cos: torch.Tensor, freqs_sin: torch.Tensor):
-        self.global_cache = torch.cat([freqs_cos, freqs_sin], dim=-1).contiguous()
-
-    def get_cache(self) -> torch.Tensor:
-        return self.global_cache
 
 
 class MovementPreprocessor(nn.Module):
@@ -202,69 +196,45 @@ class MovementInjector(ActionInjector):
         # Cache configuration
         self.max_attention_size = action_config.local_attn_size
 
-    def _init_rope_cache(self, freqs_cos: torch.Tensor, freqs_sin: torch.Tensor):
-        if self.rope_cache is None:
-            self.rope_cache = RoPE3DCache(freqs_cos=freqs_cos, freqs_sin=freqs_sin)
+        self.register_buffer(
+            "local_indices", torch.arange(2640, dtype=torch.int32), persistent=False
+        )
 
-    def plan_attention(
+        self.attn_backend = AttentionWithCache(
+            num_heads=self.num_heads,
+            head_dim=self.head_dim,
+            num_frame_per_block=3,
+            max_frames=2640,
+            local_attn_size=15,
+            workspace_buffer=workspace_buffer,
+        )
+
+    def _init_rope_cache(self, freqs: torch.Tensor):
+        if self.rope_cache is None:
+            self.rope_cache = RoPE3DCache(freqs=freqs, height=22, width=40)
+
+    def plan_kv_and_attention(
         self,
-        num_spatial: int,
-        q_len: int,
-        kv_len: int,
+        incoming_len: int,
         kv_cache: "DualPlaneKVCache",
         current_start: int,
         current_end: int,
+        grid_sizes: Tuple[int, int, int],
         cache_mode: str = "read_write",
-    ):
-        if cache_mode == "read_write":
-            kv_cache.plan_append(kv_len)
-            # Keep last max_attention_size tokens (no spatial dimension for cross-attn K/V)
-            keep_size = self.max_attention_size
-            kv_cache.evict(keep_size)
-            kv_len_total = kv_cache.total_tokens
-        elif cache_mode == "read_only":
-            # Don't modify cache state in read_only mode
-            kv_len_total = kv_cache.total_tokens + kv_len
-        else:
-            raise ValueError(f"Invalid cache_mode: {cache_mode}")
+    ) -> None:
+        """
+        Delegates planning to the backend.
+        """
+        _, height, width = grid_sizes
+        frame_seqlen = height * width
 
-        # total_q_len = num_spatial * q_len
-        if self.qo_indptr is None or self.qo_indptr.shape[0] != num_spatial + 1:
-            self.qo_indptr = torch.arange(
-                0, (num_spatial + 1) * q_len, q_len, dtype=torch.int32, device="cuda"
-            )
-        else:
-            torch.arange(
-                0,
-                (num_spatial + 1) * q_len,
-                q_len,
-                dtype=torch.int32,
-                device="cuda",
-                out=self.qo_indptr,
-            )
-
-        if self.kv_indptr is None or self.kv_indptr.shape[0] != num_spatial + 1:
-            self.kv_indptr = torch.arange(
-                0, (num_spatial + 1) * kv_len_total, kv_len_total, dtype=torch.int32, device="cuda"
-            )
-        else:
-            torch.arange(
-                0,
-                (num_spatial + 1) * kv_len_total,
-                kv_len_total,
-                dtype=torch.int32,
-                device="cuda",
-                out=self.kv_indptr,
-            )
-
-        self.flashinfer_wrapper.plan(
-            self.qo_indptr,
-            self.kv_indptr,
-            num_qo_heads=self.num_heads,
-            num_kv_heads=self.num_heads,
-            head_dim_qk=self.head_dim,
-            head_dim_vo=self.head_dim,
-            q_data_type=torch.bfloat16,
+        self.attn_backend.plan(
+            incoming_len=incoming_len,
+            kv_cache=kv_cache,
+            current_start=current_start,
+            current_end=current_end,
+            frame_seqlen=frame_seqlen,
+            cache_mode=cache_mode,
         )
 
     def forward(
@@ -273,6 +243,7 @@ class MovementInjector(ActionInjector):
         condition: Optional[torch.Tensor],
         spatial_shape: Tuple[int, int],
         temporal_shape: int,
+        freqs: torch.Tensor,
         freqs_cos: torch.Tensor,
         freqs_sin: torch.Tensor,
         kv_cache: Optional["DualPlaneKVCache"] = None,
@@ -331,7 +302,7 @@ class MovementInjector(ActionInjector):
         k = self.k_norm(k).to(v)
 
         # Apply RoPE
-        self._init_rope_cache(freqs_cos, freqs_sin)
+        self._init_rope_cache(freqs)
         assert self.rope_cache is not None
 
         BS_q, seq_len_q, H_q, D_q = q.shape
@@ -344,7 +315,7 @@ class MovementInjector(ActionInjector):
 
         cache = self.rope_cache.get_cache()
         q_flat = q.reshape(BS_q * seq_len_q, H_q * D_q)
-        k_flat = k.reshape(BS_k * seq_len_k, H_k * D_k)
+        # k_flat = k.reshape(BS_k * seq_len_k, H_k * D_k)
 
         # For cross-attention, Q and K have different shapes, so apply RoPE separately
         # FlashInfer's apply_rope_with_cos_sin_cache requires Q and K to have same shape[0]
@@ -352,50 +323,15 @@ class MovementInjector(ActionInjector):
         roped_q_flat, _ = flashinfer.apply_rope_with_cos_sin_cache(
             positions_q, q_flat, q_flat, head_size=D_q, cos_sin_cache=cache, is_neox=False
         )
-        roped_k_flat, _ = flashinfer.apply_rope_with_cos_sin_cache(
-            positions_k, k_flat, k_flat, head_size=D_k, cos_sin_cache=cache, is_neox=False
-        )
 
         # Keep batch dimension for cross-attention K/V cache (ndim=4)
-        roped_q = roped_q_flat.view(BS_q, seq_len_q, H_q, D_q)
-        roped_k = roped_k_flat.view(BS_k, seq_len_k, H_k, D_k)
-        v_batched = v  # Already [BS_k, seq_len_k, H_k, D_k]
+        roped_q = roped_q_flat.view(BS_q * seq_len_q, H_q, D_q)
+        roped_k = k.view(BS_k * seq_len_k, H_k, D_k)
+        v = v.view(BS_k * seq_len_k, H_k, D_k)
 
-        # KV cache operations
-        if kv_cache is not None:
-            if cache_mode == "read_only":
-                read_plan = kv_cache.get_read_plan()
-                k_linear, v_linear = kv_cache._storage.execute_gather_with_append(
-                    read_plan, roped_k, v_batched
-                )
-            elif cache_mode == "read_write":
-                kv_cache.execute_append(roped_k, v_batched)
-                k_linear, v_linear = kv_cache.get_linear_view()
-            else:
-                raise ValueError(f"Invalid cache_mode: {cache_mode}")
-
-            # k_linear, v_linear: [B, kv_len, H, D]
-            # Expand across S spatial locations and flatten: [B, kv_len, H, D] -> [S*kv_len, H, D]
-            k_linear_expanded = (
-                k_linear.unsqueeze(0).expand(S, -1, -1, -1, -1).reshape(-1, H_k, D_k)
-            )
-            v_linear_expanded = (
-                v_linear.unsqueeze(0).expand(S, -1, -1, -1, -1).reshape(-1, H_k, D_k)
-            )
-
-            # Flatten Q for FlashInfer: [BS_q, seq_len_q, H, D] -> [BS_q*seq_len_q, H, D]
-            roped_q_flat = roped_q.reshape(-1, H_q, D_q)
-            attn_output = self.flashinfer_wrapper.run(
-                roped_q_flat, k_linear_expanded, v_linear_expanded
-            )
-        else:
-            # No cache: expand K/V and flatten
-            # roped_k, v_batched: [B, seq_len_k, H, D]
-            roped_k_expanded = roped_k.unsqueeze(0).expand(S, -1, -1, -1, -1).reshape(-1, H_k, D_k)
-            v_expanded = v_batched.unsqueeze(0).expand(S, -1, -1, -1, -1).reshape(-1, H_k, D_k)
-
-            roped_q_flat = roped_q.reshape(-1, H_q, D_q)
-            attn_output = self.flashinfer_wrapper.run(roped_q_flat, roped_k_expanded, v_expanded)
+        attn_output = self.attn_backend(
+            roped_q=roped_q, roped_k=roped_k, v=v, kv_cache=kv_cache, cache_mode=cache_mode
+        )
 
         attn_output = attn_output.view(B * S, T, H_q, D_q)
 

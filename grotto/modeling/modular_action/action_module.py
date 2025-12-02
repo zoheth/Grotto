@@ -89,15 +89,10 @@ class ActionModule(nn.Module):
                 incoming_len, kv_cache_rotation, current_start, current_end, grid_sizes, cache_mode
             )
 
-        # if self.movement_injector is not None and kv_cache_translation is not None:
-        #     self.movement_injector.plan_kv_and_attention(
-        #         incoming_len,
-        #         kv_cache_rotation,
-        #         current_start,
-        #         current_end,
-        #         grid_sizes,
-        #         cache_mode
-        #     )
+        if self.movement_injector is not None and kv_cache_translation is not None:
+            self.movement_injector.plan_kv_and_attention(
+                3, kv_cache_translation, current_start, current_end, grid_sizes, cache_mode
+            )
 
     def forward(
         self,
@@ -136,12 +131,12 @@ class ActionModule(nn.Module):
         ), f"Sequence length mismatch: {tt}*{th}*{tw}={tt * th * tw} != {x.shape[1]}"
 
         # Convert freqs to cos/sin for FlashInfer
-        # if freqs.is_complex():
-        #     freqs_cos = freqs.real.float()
-        #     freqs_sin = freqs.imag.float()
-        # else:
-        #     freqs_cos = torch.cos(freqs.float())
-        #     freqs_sin = torch.sin(freqs.float())
+        if freqs.is_complex():
+            freqs_cos = freqs.real.float()
+            freqs_sin = freqs.imag.float()
+        else:
+            freqs_cos = torch.cos(freqs.float())
+            freqs_sin = torch.sin(freqs.float())
 
         hidden_states = x
 
@@ -159,20 +154,21 @@ class ActionModule(nn.Module):
                 cache_mode=cache_mode,
             )
 
-        # # Movement injection (camera translation)
-        # if self.movement_injector is not None and translation is not None:
-        #     hidden_states = self.movement_injector(
-        #         hidden_states,
-        #         condition=translation,
-        #         spatial_shape=(th, tw),
-        #         temporal_shape=tt,
-        #         freqs_cos=freqs_cos,
-        #         freqs_sin=freqs_sin,
-        #         kv_cache=kv_cache_translation,
-        #         start_frame=start_frame,
-        #         num_frame_per_block=num_frame_per_block,
-        #         cache_mode=cache_mode,
-        #     )
+        # Movement injection (camera translation)
+        if self.movement_injector is not None and translation is not None:
+            hidden_states = self.movement_injector(
+                hidden_states,
+                condition=translation,
+                spatial_shape=(th, tw),
+                temporal_shape=tt,
+                freqs=freqs,
+                freqs_cos=freqs_cos,
+                freqs_sin=freqs_sin,
+                kv_cache=kv_cache_translation,
+                start_frame=start_frame,
+                num_frame_per_block=num_frame_per_block,
+                cache_mode=cache_mode,
+            )
 
         return hidden_states
 
