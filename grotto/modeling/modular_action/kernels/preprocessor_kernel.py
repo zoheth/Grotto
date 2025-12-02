@@ -140,7 +140,6 @@ def rotation_preprocessor_triton(
     temporal_shape: int,
     vae_time_compression_ratio: int,
     windows_size: int,
-    is_causal: bool = False,
     num_frame_per_block: int = -1,
 ) -> torch.Tensor:
     """
@@ -170,15 +169,11 @@ def rotation_preprocessor_triton(
     pad_t = V * W
 
     # Use provided temporal_shape to split T*S
-    if is_causal:
-        assert num_frame_per_block > 0, "Must provide num_frame_per_block > 0 in causal mode"
-        T_q = num_frame_per_block
-        # Calculate t_offset from N_frames
-        N_feats = (N_frames - 1) // V + 1
-        t_offset = N_feats - num_frame_per_block
-    else:
-        T_q = temporal_shape
-        t_offset = 0
+    assert num_frame_per_block > 0, "Must provide num_frame_per_block > 0 in causal mode"
+    T_q = num_frame_per_block
+    # Calculate t_offset from N_frames
+    N_feats = (N_frames - 1) // V + 1
+    t_offset = N_feats - num_frame_per_block
 
     assert T_S % T_q == 0, f"T*S ({T_S}) must be divisible by T ({T_q})"
     S = T_S // T_q

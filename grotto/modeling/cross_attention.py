@@ -42,7 +42,14 @@ class I2VCrossAttention(nn.Module):
     Cross-attention for image-to-video with internal KV caching.
     """
 
-    def __init__(self, dim, num_heads, window_size, qk_norm=True, eps=1e-6):
+    def __init__(
+        self,
+        dim,
+        num_heads,
+        window_size,
+        qk_norm=True,
+        eps=1e-6,
+    ):
         super().__init__()
         assert dim % num_heads == 0
 

@@ -9,18 +9,19 @@ Terminology:
     Input sources: Mouse movement, gamepad right stick, etc.
 """
 
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import Optional, Tuple
 
+import flashinfer
 import torch
 from einops import rearrange
 from torch import nn
 
+from grotto.modeling.attention import AttentionWithCache
+from grotto.modeling.kv_cache import DualPlaneKVCache
 from grotto.modeling.modular_action.action_config import ActionConfig
-from grotto.modeling.modular_action.interfaces import ActionInjector, AttentionKernel
+from grotto.modeling.modular_action.interfaces import ActionInjector
 from grotto.modeling.modular_action.kernels.preprocessor_kernel import rotation_preprocessor_triton
-
-if TYPE_CHECKING:
-    from ..ring_buffer_cache import RingBufferActionCache
+from grotto.modeling.rope import RoPE3DCache
 
 
 class ViewControlPreprocessor(nn.Module):
@@ -122,7 +123,9 @@ class ViewControlInjector(ActionInjector):
         4. Output: Project back to model hidden size with residual connection
     """
 
-    def __init__(self, action_config: ActionConfig):
+    def __init__(
+        self, action_config: ActionConfig, workspace_buffer: Optional[torch.Tensor] = None
+    ):
         super().__init__()
         self.action_config = action_config
 
@@ -134,7 +137,7 @@ class ViewControlInjector(ActionInjector):
         # MLP to fuse hidden states with view control condition
         view_input_dim = (
             action_config.img_hidden_size
-            + action_config.mouse_dim_in  # Config still uses "mouse" naming
+            + action_config.mouse_dim_in
             * action_config.vae_time_compression_ratio
             * action_config.windows_size
         )
@@ -146,6 +149,8 @@ class ViewControlInjector(ActionInjector):
         )
 
         # QKV projection
+        self.num_heads = action_config.heads_num
+        self.head_dim = action_config.mouse_head_dim
         self.t_qkv = nn.Linear(
             action_config.mouse_hidden_dim,
             action_config.mouse_hidden_dim * 3,
@@ -153,9 +158,12 @@ class ViewControlInjector(ActionInjector):
         )
 
         # QK normalization
-        head_dim = action_config.mouse_head_dim
-        self.q_norm = nn.RMSNorm(head_dim, eps=1e-6) if action_config.qk_norm else nn.Identity()
-        self.k_norm = nn.RMSNorm(head_dim, eps=1e-6) if action_config.qk_norm else nn.Identity()
+        self.q_norm = (
+            nn.RMSNorm(self.head_dim, eps=1e-6) if action_config.qk_norm else nn.Identity()
+        )
+        self.k_norm = (
+            nn.RMSNorm(self.head_dim, eps=1e-6) if action_config.qk_norm else nn.Identity()
+        )
 
         # Output projection
         self.proj_view = nn.Linear(
@@ -164,11 +172,62 @@ class ViewControlInjector(ActionInjector):
             bias=action_config.qkv_bias,
         )
 
-        # Attention core
-        self.attn_core = AttentionKernel()
+        # RoPE cache
+        self.rope_cache: Optional[RoPE3DCache] = None
+
+        # FlashInfer setup
+        if workspace_buffer is None:
+            workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
+
+        self.kv_indptr = torch.zeros(2, dtype=torch.int32)
+        self.qo_indptr = torch.zeros(2, dtype=torch.int32)
+        self.flashinfer_wrapper = flashinfer.BatchPrefillWithRaggedKVCacheWrapper(
+            workspace_buffer, "NHD"
+        )
 
         # Cache configuration
         self.max_attention_size = action_config.local_attn_size
+
+        self.register_buffer(
+            "local_indices", torch.arange(2640, dtype=torch.int32), persistent=False
+        )
+
+        self.attn_backend = AttentionWithCache(
+            num_heads=self.num_heads,
+            head_dim=self.head_dim,
+            num_frame_per_block=3,
+            max_frames=2640,
+            local_attn_size=15,
+            workspace_buffer=workspace_buffer,
+        )
+
+    def _init_rope_cache(self, freqs: torch.Tensor):
+        if self.rope_cache is None:
+            self.rope_cache = RoPE3DCache(freqs=freqs, height=22, width=40)
+
+    def plan_kv_and_attention(
+        self,
+        incoming_len: int,
+        kv_cache: DualPlaneKVCache,
+        current_start: int,
+        current_end: int,
+        grid_sizes: Tuple[int, int, int],
+        cache_mode: str = "read_write",
+    ) -> None:
+        """
+        Delegates planning to the backend.
+        """
+        _, height, width = grid_sizes
+        frame_seqlen = height * width
+
+        self.attn_backend.plan(
+            incoming_len=incoming_len,
+            kv_cache=kv_cache,
+            current_start=current_start,
+            current_end=current_end,
+            frame_seqlen=frame_seqlen,
+            cache_mode=cache_mode,
+        )
 
     def forward(
         self,
@@ -176,10 +235,11 @@ class ViewControlInjector(ActionInjector):
         condition: Optional[torch.Tensor],
         spatial_shape: Tuple[int, int],
         temporal_shape: int,
-        is_causal: bool = False,
-        kv_cache: Optional["RingBufferActionCache"] = None,
-        start_frame: int = 0,
-        num_frame_per_block: int = 1,
+        freqs: torch.Tensor,
+        kv_cache: Optional["DualPlaneKVCache"],
+        current_start,
+        num_frame_per_block: int = 3,
+        cache_mode: str = "read_write",
     ) -> torch.Tensor:
         """
         Forward pass for view control condition injection.
@@ -189,10 +249,12 @@ class ViewControlInjector(ActionInjector):
             condition: [B, N_frames, C_view] - View control condition
             spatial_shape: (H, W) spatial dimensions
             temporal_shape: T temporal dimension
-            is_causal: Whether to use causal attention
+            freqs_cos: RoPE cos frequencies
+            freqs_sin: RoPE sin frequencies
             kv_cache: KV cache for incremental decoding
             start_frame: Starting frame index for RoPE
             num_frame_per_block: Number of frames per block
+            cache_mode: "read_write" or "read_only"
 
         Returns:
             Output hidden states [B, T*S, C_img]
@@ -213,7 +275,6 @@ class ViewControlInjector(ActionInjector):
             T,  # temporal_shape
             self.action_config.vae_time_compression_ratio,
             self.action_config.windows_size,
-            is_causal,
             num_frame_per_block,
         )
 
@@ -223,43 +284,39 @@ class ViewControlInjector(ActionInjector):
         # MLP
         fused_features = self.view_mlp(fused_features)
 
-        # QKV projection and split
-        qkv = self.t_qkv(fused_features)  # [BS, T, 3*C_view]
-        q, k, v = rearrange(qkv, "BS T (K H D) -> K BS T H D", K=3, H=self.action_config.heads_num)
+        # Compute Q, K, V
+        qkv = self.t_qkv(fused_features)
+        q, k, v = rearrange(qkv, "BS T (three H D) -> three BS T H D", three=3, H=self.num_heads)
+        q = self.q_norm(q).to(v)
+        k = self.k_norm(k).to(v)
 
-        # QK normalization
-        q = self.q_norm(q).to(v.dtype)
-        k = self.k_norm(k).to(v.dtype)
+        # Apply RoPE
+        self._init_rope_cache(freqs)
+        assert self.rope_cache is not None
 
-        # Attention computation with integrated RoPE
-        # Using FlashInfer's built-in RoPE is more efficient - it computes cos/sin on-the-fly
-        # and avoids separate kernel launches and memory transfers
-        if is_causal and kv_cache is not None:
-            # For causal mode with KV cache, we need to:
-            # 1. Apply RoPE to new Q/K using FlashInfer's integrated kernel
-            # 2. Update cache with the rotated K/V
-            # 3. Get the attention window from cache
-            # 4. Compute attention
+        BS, T, H, D = q.shape
+        total_tokens = BS * T
 
-            # Apply RoPE using FlashInfer's integrated kernel (more efficient than external apply_rotary_emb)
-            q_rope, k_rope = self.attn_core._apply_rope_internal(q, k, start_frame)
+        positions = self.local_indices[:total_tokens] + current_start
 
-            # Update KV cache and get window directly
-            k_window, v_window, kv_mask = kv_cache.update_and_get_window(
-                k=k_rope,
-                v=v,
-                num_new_tokens=num_frame_per_block,
-                max_attention_size=self.max_attention_size,
-            )
-            # Compute attention with cached KV (RoPE already applied, pass mask for padding handling)
-            attn_output = self.attn_core(
-                q_rope, k_window, v_window, causal=False, use_rope=False, kv_mask=kv_mask
-            )
-        else:
-            # Regular attention: use FlashInfer's integrated RoPE for best performance
-            attn_output = self.attn_core(
-                q, k, v, causal=is_causal, use_rope=True, rope_offset=start_frame
-            )
+        cache = self.rope_cache.get_cache()
+        q_flat = q.reshape(total_tokens, H * D)
+        k_flat = k.reshape(total_tokens, H * D)
+
+        roped_q_flat, roped_k_flat = flashinfer.apply_rope_with_cos_sin_cache(
+            positions, q_flat, k_flat, head_size=D, cos_sin_cache=cache, is_neox=False
+        )
+
+        # Keep batch dimension for ragged batch attention (ndim=4)
+        roped_q = roped_q_flat.view(BS * T, H, D)
+        roped_k = roped_k_flat.view(BS * T, H, D)
+        v = v.view(BS * T, H, D)
+
+        attn_output = self.attn_backend(
+            roped_q=roped_q, roped_k=roped_k, v=v, kv_cache=kv_cache, cache_mode=cache_mode
+        )
+
+        attn_output = attn_output.view(BS, T, H, D)
 
         # Reshape and project: [BS, T, H, D] -> [B, T*S, C_img]
         attn_output = rearrange(attn_output, "(B S) T H D -> B (T S) (H D)", B=B, S=S)

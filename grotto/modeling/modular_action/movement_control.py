@@ -11,15 +11,24 @@ Terminology:
 
 from typing import TYPE_CHECKING, Optional, Tuple
 
+import flashinfer
 import torch
 from einops import rearrange
 from torch import nn
 
 from grotto.modeling.modular_action.action_config import ActionConfig
-from grotto.modeling.modular_action.interfaces import ActionInjector, AttentionKernel
+from grotto.modeling.modular_action.interfaces import ActionInjector
 
 if TYPE_CHECKING:
-    from ..ring_buffer_cache import RingBufferActionCache
+    from ..kv_cache import DualPlaneKVCache
+
+
+class RoPE3DCache:
+    def __init__(self, freqs_cos: torch.Tensor, freqs_sin: torch.Tensor):
+        self.global_cache = torch.cat([freqs_cos, freqs_sin], dim=-1).contiguous()
+
+    def get_cache(self) -> torch.Tensor:
+        return self.global_cache
 
 
 class MovementPreprocessor(nn.Module):
@@ -131,7 +140,9 @@ class MovementInjector(ActionInjector):
         5. Output: Project back to model hidden size with residual connection
     """
 
-    def __init__(self, action_config: ActionConfig):
+    def __init__(
+        self, action_config: ActionConfig, workspace_buffer: Optional[torch.Tensor] = None
+    ):
         super().__init__()
         self.action_config = action_config
 
@@ -171,11 +182,90 @@ class MovementInjector(ActionInjector):
             bias=action_config.qkv_bias,
         )
 
-        # Attention core
-        self.attn_core = AttentionKernel()
+        # Attention configuration
+        self.num_heads = action_config.heads_num
+        self.head_dim = action_config.keyboard_head_dim
+
+        # RoPE cache
+        self.rope_cache: Optional[RoPE3DCache] = None
+
+        # FlashInfer setup
+        if workspace_buffer is None:
+            workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
+
+        self.kv_indptr = None
+        self.qo_indptr = None
+        self.flashinfer_wrapper = flashinfer.BatchPrefillWithRaggedKVCacheWrapper(
+            workspace_buffer, "NHD"
+        )
 
         # Cache configuration
         self.max_attention_size = action_config.local_attn_size
+
+    def _init_rope_cache(self, freqs_cos: torch.Tensor, freqs_sin: torch.Tensor):
+        if self.rope_cache is None:
+            self.rope_cache = RoPE3DCache(freqs_cos=freqs_cos, freqs_sin=freqs_sin)
+
+    def plan_attention(
+        self,
+        num_spatial: int,
+        q_len: int,
+        kv_len: int,
+        kv_cache: "DualPlaneKVCache",
+        current_start: int,
+        current_end: int,
+        cache_mode: str = "read_write",
+    ):
+        if cache_mode == "read_write":
+            kv_cache.plan_append(kv_len)
+            # Keep last max_attention_size tokens (no spatial dimension for cross-attn K/V)
+            keep_size = self.max_attention_size
+            kv_cache.evict(keep_size)
+            kv_len_total = kv_cache.total_tokens
+        elif cache_mode == "read_only":
+            # Don't modify cache state in read_only mode
+            kv_len_total = kv_cache.total_tokens + kv_len
+        else:
+            raise ValueError(f"Invalid cache_mode: {cache_mode}")
+
+        # total_q_len = num_spatial * q_len
+        if self.qo_indptr is None or self.qo_indptr.shape[0] != num_spatial + 1:
+            self.qo_indptr = torch.arange(
+                0, (num_spatial + 1) * q_len, q_len, dtype=torch.int32, device="cuda"
+            )
+        else:
+            torch.arange(
+                0,
+                (num_spatial + 1) * q_len,
+                q_len,
+                dtype=torch.int32,
+                device="cuda",
+                out=self.qo_indptr,
+            )
+
+        if self.kv_indptr is None or self.kv_indptr.shape[0] != num_spatial + 1:
+            self.kv_indptr = torch.arange(
+                0, (num_spatial + 1) * kv_len_total, kv_len_total, dtype=torch.int32, device="cuda"
+            )
+        else:
+            torch.arange(
+                0,
+                (num_spatial + 1) * kv_len_total,
+                kv_len_total,
+                dtype=torch.int32,
+                device="cuda",
+                out=self.kv_indptr,
+            )
+
+        self.flashinfer_wrapper.plan(
+            self.qo_indptr,
+            self.kv_indptr,
+            num_qo_heads=self.num_heads,
+            num_kv_heads=self.num_heads,
+            head_dim_qk=self.head_dim,
+            head_dim_vo=self.head_dim,
+            q_data_type=torch.bfloat16,
+        )
 
     def forward(
         self,
@@ -183,10 +273,12 @@ class MovementInjector(ActionInjector):
         condition: Optional[torch.Tensor],
         spatial_shape: Tuple[int, int],
         temporal_shape: int,
-        is_causal: bool = False,
-        kv_cache: Optional["RingBufferActionCache"] = None,
+        freqs_cos: torch.Tensor,
+        freqs_sin: torch.Tensor,
+        kv_cache: Optional["DualPlaneKVCache"] = None,
         start_frame: int = 0,
         num_frame_per_block: int = 1,
+        cache_mode: str = "read_write",
     ) -> torch.Tensor:
         """
         Forward pass for movement control condition injection.
@@ -196,10 +288,12 @@ class MovementInjector(ActionInjector):
             condition: [B, N_frames, C_movement] - Movement control condition
             spatial_shape: (H, W) spatial dimensions
             temporal_shape: T temporal dimension
-            is_causal: Whether to use causal attention
-            kv_cache: RingBufferActionCache for incremental decoding
+            freqs_cos: RoPE cos frequencies
+            freqs_sin: RoPE sin frequencies
+            kv_cache: DualPlaneKVCache for incremental decoding
             start_frame: Starting frame index for RoPE
             num_frame_per_block: Number of frames per block
+            cache_mode: "read_write" or "read_only"
 
         Returns:
             Output hidden states [B, T*S, C_img]
@@ -213,93 +307,97 @@ class MovementInjector(ActionInjector):
         S = H * W
 
         # Process movement condition
-        group_movement = self.preprocessor(condition, is_causal, num_frame_per_block)
-
-        # Compute Query from hidden states
-        q = self.q_proj(x)  # [B, T*S, C_movement]
-        q = q.view(B, T_S, self.action_config.heads_num, self.action_config.keyboard_head_dim)
-
-        # Compute Key-Value from movement condition
-        movement_kv = self.kv_proj(group_movement)  # [B, T_k, 2*C_movement]
-        k, v = rearrange(
-            movement_kv,
-            "B T (K H D) -> K B T H D",
-            K=2,
-            H=self.action_config.heads_num,
-            D=self.action_config.keyboard_head_dim,
+        group_movement = self.preprocessor(
+            condition, is_causal=True, num_frame_per_block=num_frame_per_block
         )
 
-        # QK normalization
-        q = self.q_norm(q).to(v.dtype)
-        k = self.k_norm(k).to(v.dtype)
+        # Compute Query from hidden states
+        q = self.q_proj(x)
+        q = q.view(B, T, S, self.num_heads, self.head_dim)
+        q = q.transpose(1, 2).reshape(B * S, T, self.num_heads, self.head_dim)
 
-        # Reshape Q for cross-attention: [B, T*S, H, D] -> [B*S, T, H, D]
-        q = rearrange(q, "B (T S) H D -> (B S) T H D", T=T, S=S)
+        # Compute Key-Value from movement condition
+        movement_kv = self.kv_proj(group_movement)
+        k, v = rearrange(
+            movement_kv,
+            "B L (K H D) -> K B L H D",
+            K=2,
+            H=self.num_heads,
+            D=self.head_dim,
+        )
 
-        # Attention computation with integrated RoPE
-        # For cross-attention with different batch sizes, apply RoPE separately to Q and K
-        # This is most efficient: each tensor only needs one RoPE kernel call
+        # Apply QK norm
+        q = self.q_norm(q).to(v)
+        k = self.k_norm(k).to(v)
 
-        # Apply RoPE to Q: [B*S, T, H, D] -> [B*S, T, H, D]
-        q_rope = self.attn_core._apply_rope_single(q, start_frame)
+        # Apply RoPE
+        self._init_rope_cache(freqs_cos, freqs_sin)
+        assert self.rope_cache is not None
 
-        # Apply RoPE to K: [B, T_k, H, D] -> [B, T_k, H, D]
-        k_rope = self.attn_core._apply_rope_single(k, start_frame)
+        BS_q, seq_len_q, H_q, D_q = q.shape
+        positions_q = torch.arange(seq_len_q, device=q.device, dtype=torch.int32) + start_frame
+        positions_q = positions_q.unsqueeze(0).expand(BS_q, -1).reshape(-1)
 
-        # Extract dimensions for cache operations
-        T_k = k_rope.shape[1]  # Temporal dimension of movement condition
-        num_heads = self.action_config.heads_num
-        head_dim = self.action_config.keyboard_head_dim
+        BS_k, seq_len_k, H_k, D_k = k.shape
+        positions_k = torch.arange(seq_len_k, device=k.device, dtype=torch.int32) + start_frame
+        positions_k = positions_k.unsqueeze(0).expand(BS_k, -1).reshape(-1)
 
-        if is_causal and kv_cache is not None:
-            # Use standard PagedCache path (Triton kernel can be re-implemented later)
-            # Need to mean-pool spatially before caching: [B, T_k, H, D] -> [B, 1, H, D] for view
-            # But for now, we cache per-spatial-location
+        cache = self.rope_cache.get_cache()
+        q_flat = q.reshape(BS_q * seq_len_q, H_q * D_q)
+        k_flat = k.reshape(BS_k * seq_len_k, H_k * D_k)
 
-            # For view cache, we cache [B*S, T_k, H, D] format
-            # Expand to spatial dimension: [B, T_k, H, D] -> [B, S, T_k, H, D]
-            k_rope_expanded = k_rope.unsqueeze(1).expand(-1, S, -1, -1, -1)
-            v_expanded = v.unsqueeze(1).expand(-1, S, -1, -1, -1)
+        # For cross-attention, Q and K have different shapes, so apply RoPE separately
+        # FlashInfer's apply_rope_with_cos_sin_cache requires Q and K to have same shape[0]
+        # Workaround: pass the same tensor for both Q and K, only use first output
+        roped_q_flat, _ = flashinfer.apply_rope_with_cos_sin_cache(
+            positions_q, q_flat, q_flat, head_size=D_q, cos_sin_cache=cache, is_neox=False
+        )
+        roped_k_flat, _ = flashinfer.apply_rope_with_cos_sin_cache(
+            positions_k, k_flat, k_flat, head_size=D_k, cos_sin_cache=cache, is_neox=False
+        )
 
-            # Reshape to [B*S, T_k, H, D] for cache update
-            k_rope_for_cache = k_rope_expanded.reshape(B * S, T_k, num_heads, head_dim)
-            v_for_cache = v_expanded.reshape(B * S, T_k, num_heads, head_dim)
+        # Keep batch dimension for cross-attention K/V cache (ndim=4)
+        roped_q = roped_q_flat.view(BS_q, seq_len_q, H_q, D_q)
+        roped_k = roped_k_flat.view(BS_k, seq_len_k, H_k, D_k)
+        v_batched = v  # Already [BS_k, seq_len_k, H_k, D_k]
 
-            # Update KV cache directly
-            # Note: Currently assumes B*S = 1, so we take [0] slice
-            k_window, v_window, kv_mask = kv_cache.update_and_get_window(
-                k=k_rope_for_cache[0:1],  # [1, T_k, H, D]
-                v=v_for_cache[0:1],  # [1, T_k, H, D]
-                num_new_tokens=T_k,
-                max_attention_size=self.max_attention_size,
+        # KV cache operations
+        if kv_cache is not None:
+            if cache_mode == "read_only":
+                read_plan = kv_cache.get_read_plan()
+                k_linear, v_linear = kv_cache._storage.execute_gather_with_append(
+                    read_plan, roped_k, v_batched
+                )
+            elif cache_mode == "read_write":
+                kv_cache.execute_append(roped_k, v_batched)
+                k_linear, v_linear = kv_cache.get_linear_view()
+            else:
+                raise ValueError(f"Invalid cache_mode: {cache_mode}")
+
+            # k_linear, v_linear: [B, kv_len, H, D]
+            # Expand across S spatial locations and flatten: [B, kv_len, H, D] -> [S*kv_len, H, D]
+            k_linear_expanded = (
+                k_linear.unsqueeze(0).expand(S, -1, -1, -1, -1).reshape(-1, H_k, D_k)
+            )
+            v_linear_expanded = (
+                v_linear.unsqueeze(0).expand(S, -1, -1, -1, -1).reshape(-1, H_k, D_k)
             )
 
-            # Expand window to all spatial locations: [1, window_len, H, D] -> [B*S, window_len, H, D]
-            k_window = k_window.expand(B * S, -1, -1, -1)
-            v_window = v_window.expand(B * S, -1, -1, -1)
-
-            # Compute attention with cached KV (RoPE already applied, pass mask for padding handling)
-            attn_output = self.attn_core(
-                q_rope, k_window, v_window, causal=False, use_rope=False, kv_mask=kv_mask
+            # Flatten Q for FlashInfer: [BS_q, seq_len_q, H, D] -> [BS_q*seq_len_q, H, D]
+            roped_q_flat = roped_q.reshape(-1, H_q, D_q)
+            attn_output = self.flashinfer_wrapper.run(
+                roped_q_flat, k_linear_expanded, v_linear_expanded
             )
         else:
-            # Regular cross-attention
-            # Expand K, V to match spatial dimension: [B, T_k, H, D] -> [B*S, T_k, H, D]
-            k_rope_expanded = (
-                k_rope.unsqueeze(1)
-                .expand(-1, S, -1, -1, -1)
-                .reshape(B * S, -1, k_rope.shape[-2], k_rope.shape[-1])
-            )
-            v_expanded = (
-                v.unsqueeze(1)
-                .expand(-1, S, -1, -1, -1)
-                .reshape(B * S, -1, v.shape[-2], v.shape[-1])
-            )
+            # No cache: expand K/V and flatten
+            # roped_k, v_batched: [B, seq_len_k, H, D]
+            roped_k_expanded = roped_k.unsqueeze(0).expand(S, -1, -1, -1, -1).reshape(-1, H_k, D_k)
+            v_expanded = v_batched.unsqueeze(0).expand(S, -1, -1, -1, -1).reshape(-1, H_k, D_k)
 
-            # Compute cross-attention (RoPE already applied)
-            attn_output = self.attn_core(
-                q_rope, k_rope_expanded, v_expanded, causal=False, use_rope=False
-            )
+            roped_q_flat = roped_q.reshape(-1, H_q, D_q)
+            attn_output = self.flashinfer_wrapper.run(roped_q_flat, roped_k_expanded, v_expanded)
+
+        attn_output = attn_output.view(B * S, T, H_q, D_q)
 
         # Reshape and project: [B*S, T, H, D] -> [B, T*S, C_img]
         attn_output = rearrange(attn_output, "(B S) T H D -> B (T S) (H D)", B=B, S=S)

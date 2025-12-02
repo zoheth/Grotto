@@ -9,7 +9,7 @@ from grotto.modeling.modular_action import ActionContext
 from grotto.types import ConditionalInputs
 
 if TYPE_CHECKING:
-    from .ring_buffer_cache import RingBufferActionCache
+    from .kv_cache import DualPlaneKVCache
 
 
 class WanDiffusionPredictor(nn.Module):
@@ -39,8 +39,8 @@ class WanDiffusionPredictor(nn.Module):
         conditional_inputs: ConditionalInputs,
         timestep: torch.Tensor,
         kv_cache: List,
-        kv_cache_mouse: Optional[List["RingBufferActionCache"]] = None,
-        kv_cache_keyboard: Optional[List["RingBufferActionCache"]] = None,
+        kv_cache_mouse: Optional[List["DualPlaneKVCache"]] = None,
+        kv_cache_keyboard: Optional[List["DualPlaneKVCache"]] = None,
         current_start: Optional[int] = None,
         cache_start: Optional[int] = None,
         cache_mode: str = "read_write",

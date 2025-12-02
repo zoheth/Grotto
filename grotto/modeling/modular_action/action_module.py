@@ -13,7 +13,7 @@ from grotto.modeling.modular_action.movement_control import MovementInjector
 from grotto.modeling.modular_action.view_control import ViewControlInjector
 
 if TYPE_CHECKING:
-    from ..ring_buffer_cache import RingBufferActionCache
+    from ..kv_cache import DualPlaneKVCache
 
 
 @dataclass
@@ -25,8 +25,8 @@ class ActionContext:
     ] = None  # [B, N_frames, C_translation] - Camera movement
 
     # Per-block KV cache
-    kv_cache_rotation: Optional["RingBufferActionCache"] = None
-    kv_cache_translation: Optional["RingBufferActionCache"] = None
+    kv_cache_mouse: Optional["DualPlaneKVCache"] = None
+    kv_cache_keyboard: Optional["DualPlaneKVCache"] = None
 
     # Runtime configuration
     num_frame_per_block: int = 1
@@ -49,7 +49,9 @@ class ActionModule(nn.Module):
         - Movement: Character movement (keyboard, gamepad left stick)
     """
 
-    def __init__(self, action_config: ActionConfig):
+    def __init__(
+        self, action_config: ActionConfig, workspace_buffer: Optional[torch.Tensor] = None
+    ):
         """
         Initialize ActionModule.
 
@@ -62,23 +64,53 @@ class ActionModule(nn.Module):
         # Initialize injectors based on config
         # Note: Config still uses "enable_mouse/keyboard" names for backward compatibility
         self.view_control_injector = (
-            ViewControlInjector(action_config) if action_config.enable_mouse else None
+            ViewControlInjector(action_config, workspace_buffer)
+            if action_config.enable_mouse
+            else None
         )
         self.movement_injector = (
-            MovementInjector(action_config) if action_config.enable_keyboard else None
+            MovementInjector(action_config, workspace_buffer)
+            if action_config.enable_keyboard
+            else None
         )
+
+    def plan(
+        self,
+        incoming_len: int,
+        kv_cache_rotation: "DualPlaneKVCache",
+        kv_cache_translation: "DualPlaneKVCache",
+        current_start: int,
+        current_end: int,
+        grid_sizes: tuple[int, int, int],
+        cache_mode: str = "read_write",
+    ):
+        if self.view_control_injector is not None and kv_cache_rotation is not None:
+            self.view_control_injector.plan_kv_and_attention(
+                incoming_len, kv_cache_rotation, current_start, current_end, grid_sizes, cache_mode
+            )
+
+        # if self.movement_injector is not None and kv_cache_translation is not None:
+        #     self.movement_injector.plan_kv_and_attention(
+        #         incoming_len,
+        #         kv_cache_rotation,
+        #         current_start,
+        #         current_end,
+        #         grid_sizes,
+        #         cache_mode
+        #     )
 
     def forward(
         self,
         x: torch.Tensor,
         grid_sizes: tuple,
+        freqs: torch.Tensor,
         rotation: Optional[torch.Tensor] = None,
         translation: Optional[torch.Tensor] = None,
-        is_causal: bool = False,
-        kv_cache_rotation: Optional["RingBufferActionCache"] = None,
-        kv_cache_translation: Optional["RingBufferActionCache"] = None,
+        kv_cache_rotation: Optional["DualPlaneKVCache"] = None,
+        kv_cache_translation: Optional["DualPlaneKVCache"] = None,
         start_frame: int = 0,
         num_frame_per_block: int = 3,
+        cache_mode: str = "read_write",
     ) -> torch.Tensor:
         """
         Inject camera control conditions into hidden states.
@@ -86,22 +118,30 @@ class ActionModule(nn.Module):
         Args:
             x: [B, T*H*W, C] - Hidden states
             grid_sizes: (F, H, W) - Latent grid dimensions
+            freqs: RoPE frequencies (complex or angles)
             rotation: [B, N_frames, C_rotation] - Camera rotation (view direction)
             translation: [B, N_frames, C_translation] - Camera translation (movement)
-            is_causal: Whether to use causal attention
             kv_cache_rotation: Rotation KV cache
             kv_cache_translation: Translation KV cache
             start_frame: Starting frame index for RoPE
             num_frame_per_block: Number of frames per block
+            cache_mode: "read_write" or "read_only"
 
         Returns:
             [B, T*H*W, C] - Processed hidden states
         """
         tt, th, tw = grid_sizes
-        x.shape[0]
         assert (
             tt * th * tw == x.shape[1]
         ), f"Sequence length mismatch: {tt}*{th}*{tw}={tt * th * tw} != {x.shape[1]}"
+
+        # Convert freqs to cos/sin for FlashInfer
+        # if freqs.is_complex():
+        #     freqs_cos = freqs.real.float()
+        #     freqs_sin = freqs.imag.float()
+        # else:
+        #     freqs_cos = torch.cos(freqs.float())
+        #     freqs_sin = torch.sin(freqs.float())
 
         hidden_states = x
 
@@ -112,24 +152,27 @@ class ActionModule(nn.Module):
                 condition=rotation,
                 spatial_shape=(th, tw),
                 temporal_shape=tt,
-                is_causal=is_causal,
+                freqs=freqs,
                 kv_cache=kv_cache_rotation,
-                start_frame=start_frame,
+                current_start=start_frame,
                 num_frame_per_block=num_frame_per_block,
+                cache_mode=cache_mode,
             )
 
-        # Movement injection (camera translation)
-        if self.movement_injector is not None and translation is not None:
-            hidden_states = self.movement_injector(
-                hidden_states,
-                condition=translation,
-                spatial_shape=(th, tw),
-                temporal_shape=tt,
-                is_causal=is_causal,
-                kv_cache=kv_cache_translation,
-                start_frame=start_frame,
-                num_frame_per_block=num_frame_per_block,
-            )
+        # # Movement injection (camera translation)
+        # if self.movement_injector is not None and translation is not None:
+        #     hidden_states = self.movement_injector(
+        #         hidden_states,
+        #         condition=translation,
+        #         spatial_shape=(th, tw),
+        #         temporal_shape=tt,
+        #         freqs_cos=freqs_cos,
+        #         freqs_sin=freqs_sin,
+        #         kv_cache=kv_cache_translation,
+        #         start_frame=start_frame,
+        #         num_frame_per_block=num_frame_per_block,
+        #         cache_mode=cache_mode,
+        #     )
 
         return hidden_states
 

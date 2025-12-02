@@ -16,7 +16,6 @@ from grotto.profiling import record_module
 
 if TYPE_CHECKING:
     from .kv_cache import DualPlaneKVCache
-    from .ring_buffer_cache import RingBufferActionCache
 
 
 class SinusoidalEmbedding(nn.Module):
@@ -73,7 +72,7 @@ class CausalWanAttentionBlock(nn.Module):
 
         if len(action_config) != 0 and block_idx in action_config["blocks"]:
             config_dict = {**action_config, "local_attn_size": local_attn_size}
-            self.action_model = ActionModule(ActionConfig.from_dict(config_dict))
+            self.action_model = ActionModule(ActionConfig.from_dict(config_dict), workspace_buffer)
         else:
             self.action_model = None
 
@@ -94,7 +93,13 @@ class CausalWanAttentionBlock(nn.Module):
             workspace_buffer=workspace_buffer,
         )
 
-        self.cross_attn = I2VCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps)
+        self.cross_attn = I2VCrossAttention(
+            dim,
+            num_heads,
+            (-1, -1),
+            qk_norm,
+            eps,
+        )
 
         self.ffn = nn.Sequential(
             nn.Linear(dim, ffn_dim), nn.GELU(approximate="tanh"), nn.Linear(ffn_dim, dim)
@@ -164,7 +169,9 @@ class CausalWanAttentionBlock(nn.Module):
             x = self._adaln_gated_residual(x, y, gate_msa, f=num_frames)
 
         # Cross-Attention and Action blocks
-        x = self._apply_condition_attn(x, context, grid_sizes, current_start, action_context)
+        x = self._apply_condition_attn(
+            x, context, grid_sizes, freqs, current_start, action_context, cache_mode
+        )
 
         # FFN block
         with record_module("FFN"):
@@ -201,8 +208,10 @@ class CausalWanAttentionBlock(nn.Module):
         x: torch.Tensor,
         context: torch.Tensor,
         grid_sizes: tuple,  # (F, H, W)
+        freqs: torch.Tensor,
         current_start: int,
         action_context: Optional[ActionContext],
+        cache_mode: str,
     ) -> torch.Tensor:
         with record_module("CLIP Cross-Attn"):
             x = x + self.cross_attn(self.norm3(x.to(context.dtype)), context)
@@ -221,13 +230,14 @@ class CausalWanAttentionBlock(nn.Module):
                 x = self.action_model(
                     x.to(context.dtype),
                     grid_sizes,
+                    freqs,
                     rotation=action_context.rotation_cond,
                     translation=action_context.translation_cond,
-                    is_causal=True,
-                    kv_cache_rotation=action_context.kv_cache_rotation,
-                    kv_cache_translation=action_context.kv_cache_translation,
+                    kv_cache_rotation=action_context.kv_cache_mouse,
+                    kv_cache_translation=action_context.kv_cache_keyboard,
                     start_frame=start_frame,
                     num_frame_per_block=action_context.num_frame_per_block,
+                    cache_mode=cache_mode,
                 )
 
         return x
@@ -397,8 +407,8 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
         cond_concat,
         kv_cache: List["DualPlaneKVCache"],
         action_context: Optional[ActionContext] = None,
-        kv_cache_mouse: Optional[List["RingBufferActionCache"]] = None,
-        kv_cache_keyboard: Optional[List["RingBufferActionCache"]] = None,
+        kv_cache_mouse: Optional[List["DualPlaneKVCache"]] = None,
+        kv_cache_keyboard: Optional[List["DualPlaneKVCache"]] = None,
         current_start: int = 0,
         cache_mode: str = "read_write",
     ):
@@ -429,14 +439,27 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
         # Batch planning: Plan KV cache and attention for ALL blocks upfront
         # This consolidates all CPU operations and potential sync points into one place
         for block_index, block in enumerate(self.blocks):
-            block.self_attn.plan_kv_and_attention(
+            block.self_attn.plan_kv_and_attention(  # type: ignore
                 incoming_len=incoming_len,
                 kv_cache=kv_cache[block_index],
                 current_start=current_start,
                 current_end=current_end,
                 grid_sizes=grid_sizes,
                 cache_mode=cache_mode,
-            )
+            )  # type: ignore
+
+            if block.action_model is not None and action_context is not None:
+                block.action_model.plan(  # type: ignore
+                    incoming_len=incoming_len,
+                    kv_cache_rotation=kv_cache_mouse[block_index] if kv_cache_mouse else None,
+                    kv_cache_translation=kv_cache_keyboard[block_index]
+                    if kv_cache_keyboard
+                    else None,
+                    current_start=current_start,
+                    current_end=current_end,
+                    grid_sizes=grid_sizes,
+                    cache_mode=cache_mode,
+                )  # type: ignore
 
         # Execute all blocks (pure GPU operations, no more planning/sync inside)
         for block_index, block in enumerate(self.blocks):
