@@ -297,6 +297,32 @@ class DualPlaneKVCache:
         # 2. Execute
         return self._storage.execute_gather(read_plan)
 
+    def evict(self, max_allowed_tokens: int) -> int:
+        """
+        Logically evict oldest tokens, keeping only the most recent max_allowed_tokens.
+        In a ring buffer, this only updates valid_len - no data movement.
+
+        Args:
+            max_allowed_tokens: Maximum number of tokens to keep
+
+        Returns:
+            Number of tokens evicted
+        """
+        current_len = self._planner.valid_len
+        if current_len <= max_allowed_tokens:
+            return 0
+
+        tokens_to_remove = current_len - max_allowed_tokens
+        self._planner.valid_len = max_allowed_tokens
+        return tokens_to_remove
+
+    def get_read_plan(self) -> ReadPlan:
+        """
+        Get the current read plan without executing it.
+        Useful for passing to execute_gather_with_append in read-only mode.
+        """
+        return self._planner.plan_read()
+
     def reset(self):
         self._planner.reset()
         self._pending_write_plan = None

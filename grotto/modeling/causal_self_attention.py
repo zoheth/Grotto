@@ -6,7 +6,7 @@ import flashinfer
 import torch
 import torch.nn as nn
 
-from grotto.modeling.ring_buffer_visual_cache import RingBufferVisualCache
+from grotto.modeling.kv_cache import DualPlaneKVCache
 
 
 class RoPE3DCache:
@@ -116,28 +116,103 @@ class CausalSelfAttention(nn.Module):
         if self.rope_cache is None:
             self.rope_cache = RoPE3DCache(freqs=freqs, height=self.height, width=self.width)
 
+    def plan_kv_and_attention(
+        self,
+        incoming_len: int,
+        kv_cache: DualPlaneKVCache,
+        current_start: int,
+        current_end: int,
+        grid_sizes: Tuple[int, int, int],
+        cache_mode: str = "read_write",
+    ) -> None:
+        """
+        Plan phase: All CPU operations, no GPU sync.
+        Must be called before forward().
+
+        Args:
+            incoming_len: Number of new tokens to append
+            kv_cache: DualPlaneKVCache instance
+            current_start: Start position of current sequence
+            current_end: End position after appending new tokens
+            grid_sizes: (num_frames, height, width) tuple
+            cache_mode: "read_write" or "read_only"
+        """
+        _, height, width = grid_sizes
+        frame_seqlen = height * width
+
+        if cache_mode == "read_write":
+            # 1. Plan append (CPU operation)
+            kv_cache.plan_append(incoming_len)
+
+            # 2. Plan eviction (CPU operation - just updates valid_len)
+            block_size = self.num_frame_per_block * frame_seqlen
+            if self.local_attn_size == -1:
+                keep_size = 15 * frame_seqlen
+            else:
+                current_block_idx = current_start // block_size
+                current_block_end = (current_block_idx + 1) * block_size
+                keep_from_position = max(0, current_block_end - self.local_attn_size * frame_seqlen)
+                keep_size = current_end - keep_from_position
+
+            kv_cache.evict(keep_size)
+            kv_len = kv_cache.total_tokens
+        elif cache_mode == "read_only":
+            # In read_only mode, we don't modify cache, but need correct length for FlashInfer
+            # Length = history + new data (temporary)
+            kv_len = kv_cache.total_tokens + incoming_len
+        else:
+            raise ValueError(f"Invalid cache_mode: {cache_mode}")
+
+        # 3. Plan FlashInfer (CPU operation)
+        self.kv_indptr[1] = kv_len
+        self.flashinfer_wrapper.plan(
+            self.qo_indptr,
+            self.kv_indptr,
+            num_qo_heads=self.num_heads,
+            num_kv_heads=self.num_heads,
+            head_dim_qk=self.head_dim,
+            head_dim_vo=self.head_dim,
+            q_data_type=torch.bfloat16,
+        )
+
     def forward(
         self,
         x: torch.Tensor,
         grid_sizes: Tuple[int, int, int],
         freqs: torch.Tensor,
-        kv_cache: RingBufferVisualCache,
+        kv_cache: DualPlaneKVCache,
         current_start: int,
         cache_mode: str = "read_write",
+        incoming_len: Optional[int] = None,
     ) -> torch.Tensor:
-        B, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
-        assert B == 1, "RingBufferVisualCache only supports batch size 1"
+        """
+        Execute phase: Pure GPU operations (planning done externally in batch).
 
+        Args:
+            x: Input tensor (B, seq_len, dim)
+            grid_sizes: (num_frames, height, width) tuple
+            freqs: RoPE frequency tensor
+            kv_cache: DualPlaneKVCache instance (must be pre-planned)
+            current_start: Start position of current sequence
+            cache_mode: "read_write" or "read_only"
+            incoming_len: Pre-computed sequence length (unused, kept for compatibility)
+
+        Returns:
+            Attention output (B, seq_len, dim)
+        """
+        B, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
+        assert B == 1, "DualPlaneKVCache only supports batch size 1"
+
+        # Note: plan_kv_and_attention() is now called externally in batch before forward pass
+
+        # 1. Compute Q, K, V (GPU)
         q = self.norm_q(self.q(x)).view(B, s, n, d)
         k = self.norm_k(self.k(x)).view(B, s, n, d)
         v = self.v(x).view(B, s, n, d)
 
+        # 2. Apply RoPE (GPU)
         self._init_rope_cache(freqs)
-
         assert self.rope_cache is not None
-
-        _, height, width = grid_sizes
-        frame_seqlen = height * width
 
         nnz = B * s
         positions = self.local_indices[:nnz] + current_start  # type: ignore
@@ -155,53 +230,29 @@ class CausalSelfAttention(nn.Module):
 
         roped_k_squeezed = roped_k.squeeze(0).contiguous()
         v_squeezed = v.squeeze(0).contiguous()
-        current_end = current_start + roped_k_squeezed.shape[0]
 
+        # 3. Execute KV cache operations (GPU)
         if cache_mode == "read_only":
-            (
-                k_linear,
-                v_linear,
-                valid_len_tensor,
-            ) = kv_cache.prepare_linear_cache_with_temporary_data(roped_k_squeezed, v_squeezed)
-
+            # Read-only mode: get history + append new data temporarily (no write to ring)
+            read_plan = kv_cache.get_read_plan()
+            k_linear, v_linear = kv_cache._storage.execute_gather_with_append(
+                read_plan, roped_k_squeezed, v_squeezed
+            )
         elif cache_mode == "read_write":
-            # Caching phase: append clean K/V to cache
-            kv_cache.append(roped_k_squeezed, v_squeezed)
-
-            block_size = self.num_frame_per_block * frame_seqlen
-            if self.local_attn_size == -1:
-                keep_size = 15 * frame_seqlen
-            else:
-                current_block_idx = current_start // block_size
-                current_block_end = (current_block_idx + 1) * block_size
-                keep_from_position = max(0, current_block_end - self.local_attn_size * frame_seqlen)
-                keep_size = current_end - keep_from_position
-
-            kv_cache.evict(keep_size)
-            # k_cache, v_cache = kv_cache.read()
-
-            k_linear, v_linear, valid_len_tensor = kv_cache.prepare_linear_cache()
-
+            # Read-write mode: execute append, then get linear view
+            kv_cache.execute_append(roped_k_squeezed, v_squeezed)
+            k_linear, v_linear = kv_cache.get_linear_view()
         else:
             raise ValueError(
                 f"Invalid cache_mode: {cache_mode}. Must be 'read_only' or 'read_write'"
             )
 
-        self.kv_indptr[1] = valid_len_tensor
-        self.flashinfer_wrapper.begin_forward(
-            self.qo_indptr,
-            self.kv_indptr,
-            num_qo_heads=self.num_heads,
-            num_kv_heads=self.num_heads,
-            head_dim_qk=self.head_dim,
-            head_dim_vo=self.head_dim,
-            q_data_type=torch.bfloat16,
-        )
-
+        # 4. Run FlashInfer attention (GPU)
         q_for_flash = roped_q.squeeze(0)
         x = self.flashinfer_wrapper.run(q_for_flash, k_linear, v_linear)
         x = x.unsqueeze(0)
 
+        # 5. Output projection
         x = x.flatten(2)
         x = self.o(x)
         return x

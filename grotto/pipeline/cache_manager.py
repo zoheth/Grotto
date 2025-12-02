@@ -2,8 +2,8 @@ from typing import List
 
 import torch
 
+from grotto.modeling.kv_cache import DualPlaneKVCache
 from grotto.modeling.ring_buffer_cache import RingBufferActionCache
-from grotto.modeling.ring_buffer_visual_cache import RingBufferVisualCache
 from grotto.pipeline.config import CacheConfig, ModelConfig
 
 
@@ -20,19 +20,19 @@ class CacheManager:
         self.device = device
         self.dtype = dtype
 
-        self.visual_cache: List[RingBufferVisualCache]
+        self.visual_cache: List[DualPlaneKVCache]
         self.mouse_cache: List[RingBufferActionCache]
         self.keyboard_cache: List[RingBufferActionCache]
 
     def initialize_all_caches(self, batch_size: int = 1) -> None:
-        assert batch_size == 1, "RingBufferVisualCache currently only supports batch_size=1"
-        self.visual_cache = self._create_ring_buffer_visual_cache(batch_size)
+        assert batch_size == 1, "DualPlaneKVCache currently only supports batch_size=1"
+        self.visual_cache = self._create_dual_plane_kv_cache(batch_size)
 
         self.mouse_cache = self._create_action_mouse_cache(batch_size)
         self.keyboard_cache = self._create_action_keyboard_cache(batch_size)
 
-    def _create_ring_buffer_visual_cache(self, batch_size: int) -> List[RingBufferVisualCache]:
-        assert batch_size == 1, "RingBufferVisualCache currently only supports batch_size=1"
+    def _create_dual_plane_kv_cache(self, batch_size: int) -> List[DualPlaneKVCache]:
+        assert batch_size == 1, "DualPlaneKVCache currently only supports batch_size=1"
 
         cache_size = self.cache_config.get_visual_cache_size(self.model_config.frame_seq_length)
         num_heads = self.model_config.num_attention_heads
@@ -41,7 +41,7 @@ class CacheManager:
         cache = []
         for _ in range(self.model_config.num_transformer_blocks):
             cache.append(
-                RingBufferVisualCache(
+                DualPlaneKVCache(
                     max_seq_len=cache_size,
                     num_heads=num_heads,
                     head_dim=head_dim,
@@ -110,9 +110,7 @@ class CacheManager:
 
     def get_caches(
         self,
-    ) -> tuple[
-        List[RingBufferVisualCache], List[RingBufferActionCache], List[RingBufferActionCache]
-    ]:
+    ) -> tuple[List[DualPlaneKVCache], List[RingBufferActionCache], List[RingBufferActionCache]]:
         if self.visual_cache is None or self.mouse_cache is None or self.keyboard_cache is None:
             raise RuntimeError("Caches must be initialized before access")
         return (self.visual_cache, self.mouse_cache, self.keyboard_cache)
