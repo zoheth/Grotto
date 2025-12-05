@@ -135,10 +135,20 @@ class MovementInjector(ActionInjector):
     """
 
     def __init__(
-        self, action_config: ActionConfig, workspace_buffer: Optional[torch.Tensor] = None
+        self,
+        action_config: ActionConfig,
+        num_frame_per_block: int,
+        height: int,
+        width: int,
+        workspace_buffer: Optional[torch.Tensor] = None,
     ):
         super().__init__()
         self.action_config = action_config
+        self.num_frame_per_block = num_frame_per_block
+        self.height = height
+        self.width = width
+        self.frame_seq_len = height * width
+        self.block_seq_len = self.frame_seq_len * num_frame_per_block
 
         # Preprocessor
         self.preprocessor = MovementPreprocessor(
@@ -197,21 +207,21 @@ class MovementInjector(ActionInjector):
         self.max_attention_size = action_config.local_attn_size
 
         self.register_buffer(
-            "local_indices", torch.arange(2640, dtype=torch.int32), persistent=False
+            "local_indices", torch.arange(self.block_seq_len, dtype=torch.int32), persistent=False
         )
 
         self.attn_backend = AttentionWithCache(
             num_heads=self.num_heads,
             head_dim=self.head_dim,
-            num_frame_per_block=3,
-            max_frames=2640,
-            local_attn_size=15,
+            num_frame_per_block=self.num_frame_per_block,
+            block_seq_len=self.block_seq_len,
+            local_attn_size=action_config.local_attn_size,
             workspace_buffer=workspace_buffer,
         )
 
     def _init_rope_cache(self, freqs: torch.Tensor):
         if self.rope_cache is None:
-            self.rope_cache = RoPE3DCache(freqs=freqs, height=22, width=40)
+            self.rope_cache = RoPE3DCache(freqs=freqs, height=self.height, width=self.width)
 
     def plan_kv_and_attention(
         self,

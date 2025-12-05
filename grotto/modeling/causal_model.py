@@ -57,6 +57,8 @@ class CausalWanAttentionBlock(nn.Module):
         action_config=None,
         block_idx=0,
         eps=1e-6,
+        height=22,
+        width=40,
         workspace_buffer: Optional[torch.Tensor] = None,
     ):
         if action_config is None:
@@ -72,7 +74,13 @@ class CausalWanAttentionBlock(nn.Module):
 
         if len(action_config) != 0 and block_idx in action_config["blocks"]:
             config_dict = {**action_config, "local_attn_size": local_attn_size}
-            self.action_model = ActionModule(ActionConfig.from_dict(config_dict), workspace_buffer)
+            self.action_model = ActionModule(
+                ActionConfig.from_dict(config_dict),
+                num_frame_per_block=num_frame_per_block,
+                height=height,
+                width=width,
+                workspace_buffer=workspace_buffer,
+            )
         else:
             self.action_model = None
 
@@ -90,6 +98,8 @@ class CausalWanAttentionBlock(nn.Module):
             sink_size,
             qk_norm,
             eps,
+            height=height,
+            width=width,
             workspace_buffer=workspace_buffer,
         )
 
@@ -310,6 +320,8 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
         local_attn_size=-1,
         sink_size=0,
         num_frame_per_block=3,
+        height=22,
+        width=40,
         qk_norm=True,
         cross_attn_norm=True,
         action_config=None,
@@ -334,6 +346,8 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
         self.num_layers = num_layers
         self.local_attn_size = local_attn_size
         self.num_frame_per_block = num_frame_per_block
+        self.height = height
+        self.width = width
         self.qk_norm = qk_norm
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
@@ -363,6 +377,8 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
                     action_config=action_config,
                     eps=eps,
                     block_idx=idx,
+                    height=self.height,
+                    width=self.width,
                     workspace_buffer=self.workspace_buffer,
                 )
                 for idx in range(num_layers)

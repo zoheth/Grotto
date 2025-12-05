@@ -13,7 +13,7 @@ class AttentionWithCache(nn.Module):
         num_heads: int,
         head_dim: int,
         num_frame_per_block: int,
-        max_frames: int,  # frame_seq_len * num_frame_per_block
+        block_seq_len: int,  # frame_seq_len * num_frame_per_block
         local_attn_size: int = -1,
         workspace_buffer: Optional[torch.Tensor] = None,
     ):
@@ -31,7 +31,7 @@ class AttentionWithCache(nn.Module):
         self.qo_indptr = torch.zeros(2, dtype=torch.int32, device="cuda")
 
         # Initialize qo_indptr based on max query length logic from original code
-        self.qo_indptr[1] = max_frames
+        self.qo_indptr[1] = block_seq_len
 
         self.flashinfer_wrapper = flashinfer.BatchPrefillWithRaggedKVCacheWrapper(
             workspace_buffer,

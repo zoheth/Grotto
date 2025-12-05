@@ -50,26 +50,50 @@ class ActionModule(nn.Module):
     """
 
     def __init__(
-        self, action_config: ActionConfig, workspace_buffer: Optional[torch.Tensor] = None
+        self,
+        action_config: ActionConfig,
+        num_frame_per_block: int,
+        height: int,
+        width: int,
+        workspace_buffer: Optional[torch.Tensor] = None,
     ):
         """
         Initialize ActionModule.
 
         Args:
             action_config: Complete configuration for the action module
+            num_frame_per_block: Number of frames per block (for causal generation)
+            height: Spatial height of latent grid
+            width: Spatial width of latent grid
+            workspace_buffer: Shared workspace buffer for FlashInfer
         """
         super().__init__()
         self.config = action_config
+        self.num_frame_per_block = num_frame_per_block
+        self.height = height
+        self.width = width
 
         # Initialize injectors based on config
         # Note: Config still uses "enable_mouse/keyboard" names for backward compatibility
         self.view_control_injector = (
-            ViewControlInjector(action_config, workspace_buffer)
+            ViewControlInjector(
+                action_config,
+                num_frame_per_block=num_frame_per_block,
+                height=height,
+                width=width,
+                workspace_buffer=workspace_buffer,
+            )
             if action_config.enable_mouse
             else None
         )
         self.movement_injector = (
-            MovementInjector(action_config, workspace_buffer)
+            MovementInjector(
+                action_config,
+                num_frame_per_block=num_frame_per_block,
+                height=height,
+                width=width,
+                workspace_buffer=workspace_buffer,
+            )
             if action_config.enable_keyboard
             else None
         )
