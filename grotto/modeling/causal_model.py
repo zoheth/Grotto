@@ -233,22 +233,22 @@ class CausalWanAttentionBlock(nn.Module):
                     "Either pass action_context or use legacy action_kwargs."
                 )
 
-            spatial_tokens_per_frame = int(grid_sizes[1] * grid_sizes[2])
-            start_frame = current_start // spatial_tokens_per_frame
+            # spatial_tokens_per_frame = int(grid_sizes[1] * grid_sizes[2])
+            # start_frame = current_start // spatial_tokens_per_frame
 
-            with record_module("Action Module"):
-                x = self.action_model(
-                    x.to(context.dtype),
-                    grid_sizes,
-                    freqs,
-                    rotation=action_context.rotation_cond,
-                    translation=action_context.translation_cond,
-                    kv_cache_rotation=action_context.kv_cache_mouse,
-                    kv_cache_translation=action_context.kv_cache_keyboard,
-                    start_frame=start_frame,
-                    num_frame_per_block=action_context.num_frame_per_block,
-                    cache_mode=cache_mode,
-                )
+            # with record_module("Action Module"):
+            #     x = self.action_model(
+            #         x.to(context.dtype),
+            #         grid_sizes,
+            #         freqs,
+            #         rotation=action_context.rotation_cond,
+            #         translation=action_context.translation_cond,
+            #         kv_cache_rotation=action_context.kv_cache_mouse,
+            #         kv_cache_translation=action_context.kv_cache_keyboard,
+            #         start_frame=start_frame,
+            #         num_frame_per_block=action_context.num_frame_per_block,
+            #         cache_mode=cache_mode,
+            #     )
 
         return x
 
@@ -464,18 +464,18 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
                 cache_mode=cache_mode,
             )  # type: ignore
 
-            if block.action_model is not None and action_context is not None:
-                block.action_model.plan(  # type: ignore
-                    incoming_len=incoming_len,
-                    kv_cache_rotation=kv_cache_mouse[block_index] if kv_cache_mouse else None,
-                    kv_cache_translation=kv_cache_keyboard[block_index]
-                    if kv_cache_keyboard
-                    else None,
-                    current_start=current_start,
-                    current_end=current_end,
-                    grid_sizes=grid_sizes,
-                    cache_mode=cache_mode,
-                )  # type: ignore
+            # if block.action_model is not None and action_context is not None:
+            #     block.action_model.plan(  # type: ignore
+            #         incoming_len=incoming_len,
+            #         kv_cache_rotation=kv_cache_mouse[block_index] if kv_cache_mouse else None,
+            #         kv_cache_translation=kv_cache_keyboard[block_index]
+            #         if kv_cache_keyboard
+            #         else None,
+            #         current_start=current_start,
+            #         current_end=current_end,
+            #         grid_sizes=grid_sizes,
+            #         cache_mode=cache_mode,
+            #     )  # type: ignore
 
         # Execute all blocks (pure GPU operations, no more planning/sync inside)
         for block_index, block in enumerate(self.blocks):

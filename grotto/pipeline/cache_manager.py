@@ -37,6 +37,7 @@ class CacheManager:
         return [
             DualPlaneKVCache(
                 max_seq_len=cache_size,
+                max_incoming_len=self.model_config.frame_seq_length,
                 num_heads=num_heads,
                 head_dim=head_dim,
                 dtype=self.dtype,
@@ -54,6 +55,7 @@ class CacheManager:
         return [
             DualPlaneKVCache(
                 max_seq_len=cache_size,
+                max_incoming_len=self.model_config.frame_seq_length,
                 num_heads=num_heads,
                 head_dim=head_dim,
                 dtype=self.dtype,
@@ -70,6 +72,7 @@ class CacheManager:
         return [
             DualPlaneKVCache(
                 max_seq_len=cache_size,
+                max_incoming_len=3,
                 num_heads=num_heads,
                 head_dim=head_dim,
                 dtype=self.dtype,

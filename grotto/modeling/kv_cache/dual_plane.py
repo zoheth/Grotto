@@ -87,6 +87,7 @@ class KVStorage:
     def __init__(
         self,
         max_seq_len: int,
+        max_incoming_len: int,
         num_heads: int,
         head_dim: int,
         dtype: torch.dtype,
@@ -100,8 +101,12 @@ class KVStorage:
 
         # 2. Linear Buffer (Contiguous View for Attention)
         #    Pre-allocated to avoid malloc during inference
-        self.k_linear = torch.zeros((max_seq_len, num_heads, head_dim), dtype=dtype, device=device)
-        self.v_linear = torch.zeros((max_seq_len, num_heads, head_dim), dtype=dtype, device=device)
+        self.k_linear = torch.zeros(
+            (max_seq_len + max_incoming_len, num_heads, head_dim), dtype=dtype, device=device
+        )
+        self.v_linear = torch.zeros(
+            (max_seq_len + max_incoming_len, num_heads, head_dim), dtype=dtype, device=device
+        )
 
         # 3. Helpers
         self._indices_buf = torch.arange(max_seq_len, device=device, dtype=torch.long)
@@ -178,6 +183,7 @@ class DualPlaneKVCache:
     def __init__(
         self,
         max_seq_len: int,
+        max_incoming_len: int,
         num_heads: int,
         head_dim: int,
         dtype: torch.dtype = torch.bfloat16,
@@ -185,7 +191,7 @@ class DualPlaneKVCache:
     ):
         # Inner Components
         self._planner = KVPlanner(max_seq_len)
-        self._storage = KVStorage(max_seq_len, num_heads, head_dim, dtype, device)
+        self._storage = KVStorage(max_seq_len, max_incoming_len, num_heads, head_dim, dtype, device)
 
         # Transaction State
         self._pending_write_plan: Optional[WritePlan] = None

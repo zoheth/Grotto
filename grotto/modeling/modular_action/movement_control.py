@@ -192,6 +192,7 @@ class MovementInjector(ActionInjector):
 
         # RoPE cache
         self.rope_cache: Optional[RoPE3DCache] = None
+        self.rope_cache_1d_temporal: Optional[torch.Tensor] = None  # For K's temporal-only RoPE
 
         # FlashInfer setup
         if workspace_buffer is None:
@@ -223,6 +224,40 @@ class MovementInjector(ActionInjector):
         if self.rope_cache is None:
             self.rope_cache = RoPE3DCache(freqs=freqs, height=self.height, width=self.width)
 
+        if self.rope_cache_1d_temporal is None:
+            # Extract only temporal component for K's 1D RoPE
+            device = freqs.device
+            max_frames = 150
+
+            if freqs.is_complex():
+                freqs = freqs.to(device=device)
+            else:
+                freqs = freqs.to(dtype=torch.float32, device=device)
+
+            head_dim_half = freqs.shape[1]
+            c_height = head_dim_half // 3
+            c_width = head_dim_half // 3
+            c_time = head_dim_half - c_height - c_width
+
+            # Only extract temporal component
+            freqs_time = freqs[:max_frames, :c_time]
+
+            # Pad to full head_dim_half (rest dimensions get identity rotation)
+            # This ensures compatibility with apply_rope_with_cos_sin_cache
+            freqs_1d = torch.zeros(max_frames, head_dim_half, dtype=freqs_time.dtype, device=device)
+            freqs_1d[:, :c_time] = freqs_time
+
+            # Compute cos and sin
+            if freqs_1d.is_complex():
+                cos = freqs_1d.real.float()
+                sin = freqs_1d.imag.float()
+            else:
+                cos = torch.cos(freqs_1d)
+                sin = torch.sin(freqs_1d)
+
+            # FlashInfer format: [max_pos, rotary_dim] where first half is cos, second half is sin
+            self.rope_cache_1d_temporal = torch.cat([cos, sin], dim=-1).contiguous()
+
     def plan_kv_and_attention(
         self,
         incoming_len: int,
@@ -236,14 +271,13 @@ class MovementInjector(ActionInjector):
         Delegates planning to the backend.
         """
         _, height, width = grid_sizes
-        frame_seqlen = height * width
 
         self.attn_backend.plan(
             incoming_len=incoming_len,
             kv_cache=kv_cache,
             current_start=current_start,
             current_end=current_end,
-            frame_seqlen=frame_seqlen,
+            frame_seqlen=1,
             cache_mode=cache_mode,
         )
 
@@ -258,7 +292,7 @@ class MovementInjector(ActionInjector):
         freqs_sin: torch.Tensor,
         kv_cache: Optional["DualPlaneKVCache"] = None,
         start_frame: int = 0,
-        num_frame_per_block: int = 1,
+        num_frame_per_block: int = 3,
         cache_mode: str = "read_write",
     ) -> torch.Tensor:
         """
@@ -314,6 +348,7 @@ class MovementInjector(ActionInjector):
         # Apply RoPE
         self._init_rope_cache(freqs)
         assert self.rope_cache is not None
+        assert self.rope_cache_1d_temporal is not None
 
         BS_q, seq_len_q, H_q, D_q = q.shape
         positions_q = torch.arange(seq_len_q, device=q.device, dtype=torch.int32) + start_frame
@@ -323,20 +358,27 @@ class MovementInjector(ActionInjector):
         positions_k = torch.arange(seq_len_k, device=k.device, dtype=torch.int32) + start_frame
         positions_k = positions_k.unsqueeze(0).expand(BS_k, -1).reshape(-1)
 
-        cache = self.rope_cache.get_cache()
+        # Apply 3D RoPE to Q (queries have spatial+temporal encoding)
+        cache_3d = self.rope_cache.get_cache()
         q_flat = q.reshape(BS_q * seq_len_q, H_q * D_q)
-        # k_flat = k.reshape(BS_k * seq_len_k, H_k * D_k)
-
-        # For cross-attention, Q and K have different shapes, so apply RoPE separately
-        # FlashInfer's apply_rope_with_cos_sin_cache requires Q and K to have same shape[0]
-        # Workaround: pass the same tensor for both Q and K, only use first output
         roped_q_flat, _ = flashinfer.apply_rope_with_cos_sin_cache(
-            positions_q, q_flat, q_flat, head_size=D_q, cos_sin_cache=cache, is_neox=False
+            positions_q, q_flat, q_flat, head_size=D_q, cos_sin_cache=cache_3d, is_neox=False
         )
 
-        # Keep batch dimension for cross-attention K/V cache (ndim=4)
+        # Apply 1D temporal RoPE to K (keys only have temporal encoding)
+        k_flat = k.reshape(BS_k * seq_len_k, H_k * D_k)
+        roped_k_flat, _ = flashinfer.apply_rope_with_cos_sin_cache(
+            positions_k,
+            k_flat,
+            k_flat,
+            head_size=D_k,
+            cos_sin_cache=self.rope_cache_1d_temporal,
+            is_neox=False,
+        )
+
+        # Reshape for attention computation
         roped_q = roped_q_flat.view(BS_q * seq_len_q, H_q, D_q)
-        roped_k = k.view(BS_k * seq_len_k, H_k, D_k)
+        roped_k = roped_k_flat.view(BS_k * seq_len_k, H_k, D_k)
         v = v.view(BS_k * seq_len_k, H_k, D_k)
 
         attn_output = self.attn_backend(

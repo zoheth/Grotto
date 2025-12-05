@@ -30,7 +30,7 @@ def profiling_session(output_path: Optional[str] = None):
         activities=activities,
         record_shapes=False,
         profile_memory=False,
-        with_stack=False,
+        with_stack=True,
     ) as prof:
         yield prof
 

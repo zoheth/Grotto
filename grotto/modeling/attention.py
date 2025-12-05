@@ -27,8 +27,8 @@ class AttentionWithCache(nn.Module):
         if workspace_buffer is None:
             workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
 
-        self.kv_indptr = torch.zeros(2, dtype=torch.int32, device="cuda")
-        self.qo_indptr = torch.zeros(2, dtype=torch.int32, device="cuda")
+        self.kv_indptr = torch.zeros(2, dtype=torch.int32, device="cpu")
+        self.qo_indptr = torch.zeros(2, dtype=torch.int32, device="cpu")
 
         # Initialize qo_indptr based on max query length logic from original code
         self.qo_indptr[1] = block_seq_len
