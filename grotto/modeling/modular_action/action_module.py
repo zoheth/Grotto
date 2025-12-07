@@ -173,7 +173,7 @@ class ActionModule(nn.Module):
                 temporal_shape=tt,
                 freqs=freqs,
                 kv_cache=kv_cache_rotation,
-                current_start=start_frame,
+                start_frame=start_frame,
                 num_frame_per_block=num_frame_per_block,
                 cache_mode=cache_mode,
             )

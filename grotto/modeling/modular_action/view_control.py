@@ -21,7 +21,6 @@ from grotto.modeling.kv_cache import DualPlaneKVCache
 from grotto.modeling.modular_action.action_config import ActionConfig
 from grotto.modeling.modular_action.interfaces import ActionInjector
 from grotto.modeling.modular_action.kernels.preprocessor_kernel import rotation_preprocessor_triton
-from grotto.modeling.rope import RoPE3DCache
 
 
 class ViewControlPreprocessor(nn.Module):
@@ -182,8 +181,7 @@ class ViewControlInjector(ActionInjector):
             bias=action_config.qkv_bias,
         )
 
-        # RoPE cache
-        self.rope_cache: Optional[RoPE3DCache] = None
+        # RoPE configuration (no cache needed - flashinfer computes on-the-fly)
 
         # FlashInfer setup
         if workspace_buffer is None:
@@ -211,9 +209,7 @@ class ViewControlInjector(ActionInjector):
             workspace_buffer=workspace_buffer,
         )
 
-    def _init_rope_cache(self, freqs: torch.Tensor):
-        if self.rope_cache is None:
-            self.rope_cache = RoPE3DCache(freqs=freqs, height=self.height, width=self.width)
+    # RoPE cache no longer needed - flashinfer.apply_rope computes cos/sin on-the-fly
 
     def plan_kv_and_attention(
         self,
@@ -247,7 +243,7 @@ class ViewControlInjector(ActionInjector):
         temporal_shape: int,
         freqs: torch.Tensor,
         kv_cache: Optional["DualPlaneKVCache"],
-        current_start,
+        start_frame: int = 0,
         num_frame_per_block: int = 3,
         cache_mode: str = "read_write",
     ) -> torch.Tensor:
@@ -300,26 +296,34 @@ class ViewControlInjector(ActionInjector):
         q = self.q_norm(q).to(v)
         k = self.k_norm(k).to(v)
 
-        # Apply RoPE
-        self._init_rope_cache(freqs)
-        assert self.rope_cache is not None
-
+        # Apply 1D temporal RoPE using flashinfer (matching reference implementation)
+        # flashinfer.apply_rope computes cos/sin on-the-fly, no need for pre-cached freqs
+        # Each spatial position is an independent sequence of length T
         BS, T, H, D = q.shape
-        total_tokens = BS * T
 
-        positions = self.local_indices[:total_tokens] + current_start
+        # Reshape to ragged tensor format: [nnz, num_heads, head_dim]
+        q_ragged = q.reshape(BS * T, H, D)
+        k_ragged = k.reshape(BS * T, H, D)
 
-        cache = self.rope_cache.get_cache()
-        q_flat = q.reshape(total_tokens, H * D)
-        k_flat = k.reshape(total_tokens, H * D)
+        # Create indptr: [0, T, 2*T, ..., BS*T]
+        # Each of the BS sequences has length T
+        indptr = torch.arange(0, BS + 1, dtype=torch.int32, device=q.device) * T
 
-        roped_q_flat, roped_k_flat = flashinfer.apply_rope_with_cos_sin_cache(
-            positions, q_flat, k_flat, head_size=D, cos_sin_cache=cache, is_neox=False
+        # Create offsets: all sequences start at the same frame (start_frame)
+        offsets = torch.full((BS,), start_frame, dtype=torch.int32, device=q.device)
+
+        # Apply RoPE - computes cos/sin on-the-fly based on offsets
+        roped_q, roped_k = flashinfer.apply_rope(
+            q_ragged,
+            k_ragged,
+            indptr,
+            offsets,
+            interleave=False,  # Use split layout (first half / second half)
+            rope_theta=self.action_config.rope_theta
+            if hasattr(self.action_config, "rope_theta")
+            else 256.0,
         )
 
-        # Keep batch dimension for ragged batch attention (ndim=4)
-        roped_q = roped_q_flat.view(BS * T, H, D)
-        roped_k = roped_k_flat.view(BS * T, H, D)
         v = v.view(BS * T, H, D)
 
         attn_output = self.attn_backend(

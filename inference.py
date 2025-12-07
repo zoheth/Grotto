@@ -1,7 +1,7 @@
 import os
 
-# os.environ["PYTHONBREAKPOINT"] = "0"
-# os.environ["_TYPER_STANDARD_TRACEBACK"] = "1"
+os.environ["PYTHONBREAKPOINT"] = "0"
+os.environ["_TYPER_STANDARD_TRACEBACK"] = "1"
 from datetime import datetime
 from pathlib import Path
 
