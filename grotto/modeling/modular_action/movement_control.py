@@ -185,13 +185,9 @@ class MovementInjector(ActionInjector):
             bias=action_config.qkv_bias,
         )
 
-        # Attention configuration
         self.num_heads = action_config.heads_num
         self.head_dim = action_config.keyboard_head_dim
 
-        # RoPE configuration (no cache needed - flashinfer computes on-the-fly)
-
-        # FlashInfer setup
         if workspace_buffer is None:
             workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
 
@@ -217,22 +213,15 @@ class MovementInjector(ActionInjector):
             workspace_buffer=workspace_buffer,
         )
 
-    # RoPE cache no longer needed - flashinfer.apply_rope computes cos/sin on-the-fly
-
     def plan_kv_and_attention(
         self,
         incoming_len: int,
         kv_cache: "DualPlaneKVCache",
         current_start: int,
         current_end: int,
-        grid_sizes: Tuple[int, int, int],
+        grid_sizes: Tuple[int, int, int],  # Unused but kept for interface consistency
         cache_mode: str = "read_write",
     ) -> None:
-        """
-        Delegates planning to the backend.
-        """
-        _, height, width = grid_sizes
-
         self.attn_backend.plan(
             incoming_len=incoming_len,
             kv_cache=kv_cache,
@@ -282,83 +271,52 @@ class MovementInjector(ActionInjector):
         H, W = spatial_shape
         S = H * W
 
-        # Process movement condition
-        group_movement = self.preprocessor(
+        movement_features = self.preprocessor(
             condition, is_causal=True, num_frame_per_block=num_frame_per_block
         )
 
-        # Compute Query from hidden states
+        # Query from visual features: [B, T*S, C] -> [B*S, T, H, D]
         q = self.q_proj(x)
         q = q.view(B, T, S, self.num_heads, self.head_dim)
         q = q.transpose(1, 2).reshape(B * S, T, self.num_heads, self.head_dim)
 
-        # Compute Key-Value from movement condition
-        movement_kv = self.kv_proj(group_movement)
-        k, v = rearrange(
-            movement_kv,
-            "B L (K H D) -> K B L H D",
-            K=2,
-            H=self.num_heads,
-            D=self.head_dim,
-        )
+        # Key-Value from movement condition: [B, L, C] -> [B, L, H, D]
+        movement_kv = self.kv_proj(movement_features)
+        k, v = rearrange(movement_kv, "B L (K H D) -> K B L H D", K=2, H=self.num_heads)
 
-        # Apply QK norm
         q = self.q_norm(q).to(v)
         k = self.k_norm(k).to(v)
 
-        # Apply 1D temporal RoPE using flashinfer (matching reference implementation)
+        # Apply 1D temporal RoPE to Q and K separately (cross-attention)
+        rope_theta = getattr(self.action_config, "rope_theta", 256.0)
 
-        # Apply RoPE to Q: [BS, T, H, D] where BS = B * S
-        # Each spatial position is an independent sequence
+        # Q: [B*S, T_q, H, D] - each spatial position is independent sequence
         BS, T_q, H_q, D_q = q.shape
         q_ragged = q.reshape(BS * T_q, H_q, D_q)
-
         indptr_q = torch.arange(0, BS + 1, dtype=torch.int32, device=q.device) * T_q
         offsets_q = torch.full((BS,), start_frame, dtype=torch.int32, device=q.device)
-
-        # Dummy k for apply_rope (we only need q roped)
         roped_q, _ = flashinfer.apply_rope(
-            q_ragged,
-            q_ragged,  # Dummy, we'll replace k separately
-            indptr_q,
-            offsets_q,
-            interleave=False,
-            rope_theta=self.action_config.rope_theta
-            if hasattr(self.action_config, "rope_theta")
-            else 256.0,
+            q_ragged, q_ragged, indptr_q, offsets_q, interleave=False, rope_theta=rope_theta
         )
 
-        # Apply RoPE to K: [B, T, H, D]
-        # K comes from movement condition, B sequences of length T
+        # K: [B, T_k, H, D] - movement sequences
         B, T_k, H_k, D_k = k.shape
         k_ragged = k.reshape(B * T_k, H_k, D_k)
-
         indptr_k = torch.arange(0, B + 1, dtype=torch.int32, device=k.device) * T_k
         offsets_k = torch.full((B,), start_frame, dtype=torch.int32, device=k.device)
-
         _, roped_k = flashinfer.apply_rope(
-            k_ragged,
-            k_ragged,
-            indptr_k,
-            offsets_k,
-            interleave=False,
-            rope_theta=self.action_config.rope_theta
-            if hasattr(self.action_config, "rope_theta")
-            else 256.0,
+            k_ragged, k_ragged, indptr_k, offsets_k, interleave=False, rope_theta=rope_theta
         )
 
-        v = v.view(B * T_k, H_k, D_k)
+        v = v.reshape(B * T_k, H_k, D_k)
 
         attn_output = self.attn_backend(
             roped_q=roped_q, roped_k=roped_k, v=v, kv_cache=kv_cache, cache_mode=cache_mode
         )
 
+        # [BS*T, H, D] -> [BS, T, H, D] -> [B, T*S, H*D]
         attn_output = attn_output.view(B * S, T, H_q, D_q)
-
-        # Reshape and project: [B*S, T, H, D] -> [B, T*S, C_img]
         attn_output = rearrange(attn_output, "(B S) T H D -> B (T S) (H D)", B=B, S=S)
         attn_output = self.proj_movement(attn_output)
 
-        # Residual connection
-        output = x + attn_output
-        return output
+        return x + attn_output

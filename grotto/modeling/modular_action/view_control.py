@@ -181,9 +181,6 @@ class ViewControlInjector(ActionInjector):
             bias=action_config.qkv_bias,
         )
 
-        # RoPE configuration (no cache needed - flashinfer computes on-the-fly)
-
-        # FlashInfer setup
         if workspace_buffer is None:
             workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
 
@@ -209,8 +206,6 @@ class ViewControlInjector(ActionInjector):
             workspace_buffer=workspace_buffer,
         )
 
-    # RoPE cache no longer needed - flashinfer.apply_rope computes cos/sin on-the-fly
-
     def plan_kv_and_attention(
         self,
         incoming_len: int,
@@ -220,18 +215,13 @@ class ViewControlInjector(ActionInjector):
         grid_sizes: Tuple[int, int, int],
         cache_mode: str = "read_write",
     ) -> None:
-        """
-        Delegates planning to the backend.
-        """
         _, height, width = grid_sizes
-        frame_seqlen = height * width
-
         self.attn_backend.plan(
             incoming_len=incoming_len,
             kv_cache=kv_cache,
             current_start=current_start,
             current_end=current_end,
-            frame_seqlen=frame_seqlen,
+            frame_seqlen=height * width,
             cache_mode=cache_mode,
         )
 
@@ -273,69 +263,47 @@ class ViewControlInjector(ActionInjector):
         H, W = spatial_shape
         S = H * W
 
-        # Fuse with view control condition using triton kernel (accepts B, T*S, C directly)
-        # Output: [B, S, T, C_fused]
-        fused_features = rotation_preprocessor_triton(
-            x,  # [B, T*S, C_img]
+        # [B, T*S, C_img] -> [B, S, T, C_fused]
+        fused = rotation_preprocessor_triton(
+            x,
             condition,
-            T,  # temporal_shape
+            T,
             self.action_config.vae_time_compression_ratio,
             self.action_config.windows_size,
             num_frame_per_block,
         )
+        # [B, S, T, C_fused] -> [B*S, T, C_fused]
+        fused = fused.reshape(B * S, T, -1)
+        fused = self.view_mlp(fused)
 
-        # Merge B and S dimensions: [B, S, T, C_fused] -> [B*S, T, C_fused]
-        fused_features = fused_features.reshape(B * S, T, -1)
-
-        # MLP
-        fused_features = self.view_mlp(fused_features)
-
-        # Compute Q, K, V
-        qkv = self.t_qkv(fused_features)
+        # [B*S, T, C] -> [B*S, T, 3*H*D] -> [B*S, T, H, D]
+        qkv = self.t_qkv(fused)
         q, k, v = rearrange(qkv, "BS T (three H D) -> three BS T H D", three=3, H=self.num_heads)
         q = self.q_norm(q).to(v)
         k = self.k_norm(k).to(v)
 
-        # Apply 1D temporal RoPE using flashinfer (matching reference implementation)
-        # flashinfer.apply_rope computes cos/sin on-the-fly, no need for pre-cached freqs
-        # Each spatial position is an independent sequence of length T
+        # Apply 1D temporal RoPE: BS independent sequences, each of length T
         BS, T, H, D = q.shape
-
-        # Reshape to ragged tensor format: [nnz, num_heads, head_dim]
-        q_ragged = q.reshape(BS * T, H, D)
+        q_ragged = q.reshape(BS * T, H, D)  # [BS*T, H, D]
         k_ragged = k.reshape(BS * T, H, D)
 
-        # Create indptr: [0, T, 2*T, ..., BS*T]
-        # Each of the BS sequences has length T
         indptr = torch.arange(0, BS + 1, dtype=torch.int32, device=q.device) * T
-
-        # Create offsets: all sequences start at the same frame (start_frame)
         offsets = torch.full((BS,), start_frame, dtype=torch.int32, device=q.device)
 
-        # Apply RoPE - computes cos/sin on-the-fly based on offsets
+        rope_theta = getattr(self.action_config, "rope_theta", 256.0)
         roped_q, roped_k = flashinfer.apply_rope(
-            q_ragged,
-            k_ragged,
-            indptr,
-            offsets,
-            interleave=False,  # Use split layout (first half / second half)
-            rope_theta=self.action_config.rope_theta
-            if hasattr(self.action_config, "rope_theta")
-            else 256.0,
+            q_ragged, k_ragged, indptr, offsets, interleave=False, rope_theta=rope_theta
         )
 
-        v = v.view(BS * T, H, D)
+        v = v.reshape(BS * T, H, D)
 
         attn_output = self.attn_backend(
             roped_q=roped_q, roped_k=roped_k, v=v, kv_cache=kv_cache, cache_mode=cache_mode
         )
 
+        # [BS*T, H, D] -> [BS, T, H, D] -> [B, T*S, H*D]
         attn_output = attn_output.view(BS, T, H, D)
-
-        # Reshape and project: [BS, T, H, D] -> [B, T*S, C_img]
         attn_output = rearrange(attn_output, "(B S) T H D -> B (T S) (H D)", B=B, S=S)
         attn_output = self.proj_view(attn_output)
 
-        # Residual connection
-        output = x + attn_output
-        return output
+        return x + attn_output
