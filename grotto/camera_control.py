@@ -406,3 +406,34 @@ def generate_camera_navigation(
     )
 
     return sequence.to_tensors()
+
+
+def generate_left_right_sequence(
+    total_frames: int = 57,
+    frames_per_direction: int = 10,
+    config: CameraControlConfig | None = None,
+) -> CameraControlTensors:
+    if config is None:
+        config = STANDARD_CAMERA_CONFIG
+
+    sequence = CameraControlSequence(config, total_frames)
+    left_idx = config.translation.action_to_index["left"]
+    right_idx = config.translation.action_to_index["right"]
+
+    sequence.set_frame(0, translation=[0, 0, 0, 0], rotation=[0, 0])
+
+    current_frame = 1
+    going_right = True
+
+    while current_frame < total_frames:
+        translation = [0.0, 0.0, 0.0, 0.0]
+        translation[right_idx if going_right else left_idx] = 1.0
+
+        segment_end = min(current_frame + frames_per_direction, total_frames)
+        for frame_idx in range(current_frame, segment_end):
+            sequence.set_frame(frame_idx, translation=translation, rotation=[0, 0])
+
+        current_frame = segment_end
+        going_right = not going_right
+
+    return sequence.to_tensors()

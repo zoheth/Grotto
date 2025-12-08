@@ -399,7 +399,7 @@ class VaeDecoder3d(nn.Module):
         cache_middle = cache_states[1] if cache_states is not None else None
         cache_upsamples = cache_states[2] if cache_states is not None else None
         cache_head = cache_states[3] if cache_states is not None and len(cache_states) > 3 else None
-
+        print(cache_conv1)
         x = self.conv1(x, cache_conv1)
 
         for layer in self.middle:

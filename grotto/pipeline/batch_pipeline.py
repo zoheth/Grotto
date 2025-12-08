@@ -1,4 +1,4 @@
-from typing import List
+from typing import TYPE_CHECKING, List
 
 import torch
 from einops import rearrange
@@ -10,13 +10,17 @@ from grotto.pipeline.cache_manager import CacheManager
 from grotto.pipeline.config import PipelineConfig
 from grotto.types import ConditionalInputs
 
+if TYPE_CHECKING:
+    from grotto.modeling.predictor import WanDiffusionPredictor
+    from grotto.modeling.vae_wrapper import VaeDecoderWrapper
+
 
 class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
     def __init__(
         self,
         config: PipelineConfig,
-        predictor,
-        vae_decoder,
+        predictor: "WanDiffusionPredictor",
+        vae_decoder: "VaeDecoderWrapper",
         device: str = "cuda",
     ):
         super().__init__(config, predictor, vae_decoder, device)
@@ -162,20 +166,38 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
         videos = []
 
         current_start_frame = 0
+        logical_frame_position = 0
 
         all_num_frames = [self.config.inference.num_frame_per_block] * num_blocks
 
         for _block_idx, current_num_frames in enumerate(tqdm(all_num_frames)):
+            if _block_idx >= 2 and _block_idx % 2 == 0:
+                visual_cache, mouse_cache, keyboard_cache = self.cache_manager.get_caches()
+                for cache in visual_cache:
+                    cache.pop_latent(2)
+                for cache in mouse_cache:
+                    cache.pop_latent(2)
+                for cache in keyboard_cache:
+                    cache.pop_latent(2)
+                vae_cache = [None] * len(ZERO_VAE_CACHE)
+                logical_frame_position = 0
+
+                # if vae_cache[0] is not None:
+                #     for cache_obj in vae_cache:
+                #         if hasattr(cache_obj, 'rewind'):
+                #             print("!")
+                #             cache_obj.rewind(2)
+
             noisy_input = noise[
                 :, :, current_start_frame : current_start_frame + current_num_frames
             ]
 
             block_cond, _ = self.condition_processor.slice_block_conditions(
-                conditional_inputs, current_start_frame, current_num_frames
+                conditional_inputs, logical_frame_position, current_num_frames
             )
 
             denoised_pred = self._denoise_block(
-                noisy_input, block_cond, current_start_frame, batch_size
+                noisy_input, block_cond, logical_frame_position, batch_size
             )
 
             output[
@@ -183,13 +205,14 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
             ] = denoised_pred
 
             self._update_kv_cache_with_clean_context(
-                denoised_pred, block_cond, current_start_frame, batch_size
+                denoised_pred, block_cond, logical_frame_position, batch_size
             )
 
             video, vae_cache = self._decode_latent_to_video(denoised_pred, vae_cache)
             videos.append(video)
 
             current_start_frame += current_num_frames
+            logical_frame_position += current_num_frames
 
         if return_latents:
             return output

@@ -9,7 +9,8 @@ from einops import rearrange
 from safetensors.torch import load_file
 from torchvision.transforms import v2
 
-from grotto.camera_control import generate_camera_navigation
+# from grotto.camera_control import generate_camera_navigation
+from grotto.camera_control import generate_left_right_sequence
 from grotto.modeling.predictor import WanDiffusionPredictor
 from grotto.modeling.vae_wrapper import VaeDecoderWrapper, create_wan_encoder
 from grotto.modeling.weight_mapping_config import (
@@ -101,7 +102,7 @@ class VideoGenerator:
             logging.info("VAE decoder compilation skipped as per user request.")
         elif compile_mode == VAECompileMode.FORCE:
             logging.info("Forcing VAE decoder compilation...")
-            vae_decoder = torch.compile(vae_decoder, mode="max-autotune-no-cudagraphs")
+            vae_decoder.compile(mode="max-autotune-no-cudagraphs")
             torch.save(vae_decoder, compiled_model_path)
             logging.info(f"Compiled VAE decoder saved to {compiled_model_path}")
         elif compile_mode == VAECompileMode.AUTO:
@@ -112,7 +113,7 @@ class VideoGenerator:
                 )
             else:
                 logging.info("Compiling VAE decoder...")
-                vae_decoder = torch.compile(vae_decoder, mode="max-autotune-no-cudagraphs")
+                vae_decoder.compile(mode="max-autotune-no-cudagraphs")
                 torch.save(vae_decoder, compiled_model_path)
                 logging.info(f"Compiled VAE decoder saved to {compiled_model_path}")
 
@@ -168,7 +169,8 @@ class VideoGenerator:
                 [1, 16, num_frames, 44, 80], device=self.device, dtype=self.weight_dtype
             )
             num_video_frames = (num_frames - 1) * 4 + 1
-            camera_control = generate_camera_navigation(num_video_frames).unsqueeze_batch()
+            # camera_control = generate_camera_navigation(num_video_frames).unsqueeze_batch()
+            camera_control = generate_left_right_sequence(num_video_frames).unsqueeze_batch()
 
             conditional_inputs = ConditionalInputs(
                 cond_concat=cond_concat,

@@ -103,20 +103,15 @@ class ActionModule(nn.Module):
         incoming_len: int,
         kv_cache_rotation: "DualPlaneKVCache",
         kv_cache_translation: "DualPlaneKVCache",
-        current_start: int,
-        current_end: int,
-        grid_sizes: tuple[int, int, int],
         cache_mode: str = "read_write",
     ):
         if self.view_control_injector is not None and kv_cache_rotation is not None:
             self.view_control_injector.plan_kv_and_attention(
-                incoming_len, kv_cache_rotation, current_start, current_end, grid_sizes, cache_mode
+                incoming_len, kv_cache_rotation, cache_mode
             )
 
         if self.movement_injector is not None and kv_cache_translation is not None:
-            self.movement_injector.plan_kv_and_attention(
-                3, kv_cache_translation, current_start, current_end, grid_sizes, cache_mode
-            )
+            self.movement_injector.plan_kv_and_attention(3, kv_cache_translation, cache_mode)
 
     def forward(
         self,

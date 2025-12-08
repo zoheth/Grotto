@@ -33,13 +33,15 @@ class CacheManager:
         cache_size = self.cache_config.get_visual_cache_size(self.model_config.frame_seq_length)
         num_heads = self.model_config.num_attention_heads
         head_dim = self.model_config.head_dim
+        incoming_len = self.model_config.frame_seq_length * 3
 
         return [
             DualPlaneKVCache(
                 max_seq_len=cache_size,
-                max_incoming_len=self.model_config.frame_seq_length,
+                max_incoming_len=incoming_len,
                 num_heads=num_heads,
                 head_dim=head_dim,
+                tokens_per_latent=incoming_len,
                 dtype=self.dtype,
                 device=self.device,
             )
@@ -51,13 +53,15 @@ class CacheManager:
         cache_size = self.cache_config.get_visual_cache_size(self.model_config.frame_seq_length)
         num_heads = self.model_config.num_action_attention_heads
         head_dim = self.model_config.action_head_dim
+        incoming_len = self.model_config.frame_seq_length * 3
 
         return [
             DualPlaneKVCache(
                 max_seq_len=cache_size,
-                max_incoming_len=self.model_config.frame_seq_length,
+                max_incoming_len=incoming_len,
                 num_heads=num_heads,
                 head_dim=head_dim,
+                tokens_per_latent=incoming_len,
                 dtype=self.dtype,
                 device=self.device,
             )
@@ -75,6 +79,7 @@ class CacheManager:
                 max_incoming_len=3,
                 num_heads=num_heads,
                 head_dim=head_dim,
+                tokens_per_latent=3,
                 dtype=self.dtype,
                 device=self.device,
             )

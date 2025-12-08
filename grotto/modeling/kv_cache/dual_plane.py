@@ -33,18 +33,22 @@ class ReadPlan:
 
 
 class KVPlanner:
-    __slots__ = ("max_seq_len", "write_pos", "valid_len")
+    __slots__ = ("max_seq_len", "write_pos", "valid_len", "tokens_per_latent", "latent_count")
 
-    def __init__(self, max_seq_len: int):
+    def __init__(self, max_seq_len: int, tokens_per_latent: int = 1):
         self.max_seq_len = max_seq_len
+        self.tokens_per_latent = tokens_per_latent
         self.write_pos = 0
         self.valid_len = 0
+        self.latent_count = 0
 
     def reset(self):
         self.write_pos = 0
         self.valid_len = 0
+        self.latent_count = 0
 
     def plan_append(self, incoming_len: int) -> WritePlan:
+        # Calculate write operations for ring buffer
         ops = []
         start = self.write_pos
         remaining = incoming_len
@@ -63,9 +67,47 @@ class KVPlanner:
             src_offset += chunk
             remaining -= chunk
 
+        # Update valid length before eviction (for latent counting)
+        old_valid_len = self.valid_len
         self.write_pos = start
-        self.valid_len = min(self.valid_len + incoming_len, self.max_seq_len)
+
+        # Evict old tokens if we would exceed max_seq_len (sliding window)
+        if self.valid_len + incoming_len > self.max_seq_len:
+            # Oldest tokens will be overwritten by ring buffer wrapping
+            # Just update valid_len to maintain sliding window of max_seq_len
+            self.valid_len = self.max_seq_len
+        else:
+            self.valid_len += incoming_len
+
+        actual_added = self.valid_len - old_valid_len
+        # print(f"[plan_append] incoming_len={incoming_len}, tokens_per_latent={self.tokens_per_latent}, actual_added={actual_added}, old_latent_count={self.latent_count}")
+        if actual_added == self.tokens_per_latent:
+            self.latent_count += 1
+            # print(f"[plan_append] INCREMENTED latent_count to {self.latent_count}")
+
         return WritePlan(ops=ops, new_valid_len=self.valid_len, incoming_len=incoming_len)
+
+    def push_latent(self) -> WritePlan:
+        return self.plan_append(self.tokens_per_latent)
+
+    def pop_latent(self, count: int = 1) -> int:
+        if count <= 0:
+            return 0
+        # print(f"[pop_latent] Attempting to pop {count} latents, current latent_count={self.latent_count}, valid_len={self.valid_len}, tokens_per_latent={self.tokens_per_latent}")
+
+        actual_pop = min(count, self.latent_count)
+        if actual_pop == 0:
+            # print(f"[pop_latent] Nothing to pop, latent_count=0")
+            return 0
+
+        tokens_to_remove = actual_pop * self.tokens_per_latent
+        tokens_to_remove = min(tokens_to_remove, self.valid_len)
+
+        self.valid_len -= tokens_to_remove
+        self.write_pos = (self.write_pos - tokens_to_remove) % self.max_seq_len
+        self.latent_count -= actual_pop
+        # print(f"[pop_latent] Popped {actual_pop} latents, new latent_count={self.latent_count}, new valid_len={self.valid_len}")
+        return tokens_to_remove
 
     def plan_read(self) -> ReadPlan:
         if self.valid_len == 0:
@@ -186,11 +228,12 @@ class DualPlaneKVCache:
         max_incoming_len: int,
         num_heads: int,
         head_dim: int,
+        tokens_per_latent: int = 1,
         dtype: torch.dtype = torch.bfloat16,
         device: torch.device = torch.device("cuda"),
     ):
         # Inner Components
-        self._planner = KVPlanner(max_seq_len)
+        self._planner = KVPlanner(max_seq_len, tokens_per_latent)
         self._storage = KVStorage(max_seq_len, max_incoming_len, num_heads, head_dim, dtype, device)
 
         # Transaction State
@@ -315,11 +358,13 @@ class DualPlaneKVCache:
             Number of tokens evicted
         """
         current_len = self._planner.valid_len
+        # print(f"[evict] max_allowed_tokens={max_allowed_tokens}, current_len={current_len}, latent_count={self._planner.latent_count}")
         if current_len <= max_allowed_tokens:
             return 0
 
         tokens_to_remove = current_len - max_allowed_tokens
         self._planner.valid_len = max_allowed_tokens
+        # print(f"[evict] Evicted {tokens_to_remove} tokens, new valid_len={self._planner.valid_len}, latent_count unchanged={self._planner.latent_count}")
         return tokens_to_remove
 
     def get_read_plan(self) -> ReadPlan:
@@ -328,6 +373,24 @@ class DualPlaneKVCache:
         Useful for passing to execute_gather_with_append in read-only mode.
         """
         return self._planner.plan_read()
+
+    def push_latent(self) -> "DualPlaneKVCache":
+        if self._pending_write_plan is not None:
+            raise StateError("Cannot push latent while a previous plan is pending execution")
+
+        plan = self._planner.push_latent()
+        self._pending_write_plan = plan
+        return self
+
+    def pop_latent(self, count: int = 1) -> int:
+        if self._pending_write_plan is not None:
+            raise StateError("Cannot pop latent while a transaction is pending")
+
+        return self._planner.pop_latent(count)
+
+    @property
+    def latent_count(self) -> int:
+        return self._planner.latent_count
 
     def reset(self):
         self._planner.reset()

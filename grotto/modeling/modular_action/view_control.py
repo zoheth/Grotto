@@ -210,18 +210,11 @@ class ViewControlInjector(ActionInjector):
         self,
         incoming_len: int,
         kv_cache: DualPlaneKVCache,
-        current_start: int,
-        current_end: int,
-        grid_sizes: Tuple[int, int, int],
         cache_mode: str = "read_write",
     ) -> None:
-        _, height, width = grid_sizes
         self.attn_backend.plan(
             incoming_len=incoming_len,
             kv_cache=kv_cache,
-            current_start=current_start,
-            current_end=current_end,
-            frame_seqlen=height * width,
             cache_mode=cache_mode,
         )
 

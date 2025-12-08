@@ -42,30 +42,16 @@ class AttentionWithCache(nn.Module):
         self,
         incoming_len: int,
         kv_cache: DualPlaneKVCache,
-        current_start: int,
-        current_end: int,
-        frame_seqlen: int,  # height * width
         cache_mode: str = "read_write",
     ) -> None:
         """
         Plan phase: All CPU operations.
         Updates KV Cache state and plans FlashInfer execution.
+        KV cache automatically handles sliding window eviction via ring buffer.
         """
         if cache_mode == "read_write":
-            # 1. Plan append
+            # 1. Plan append (KV cache automatically handles sliding window via ring buffer)
             kv_cache.plan_append(incoming_len)
-
-            # 2. Plan eviction
-            block_size = self.num_frame_per_block * frame_seqlen
-            if self.local_attn_size == -1:
-                keep_size = 15 * frame_seqlen
-            else:
-                current_block_idx = current_start // block_size
-                current_block_end = (current_block_idx + 1) * block_size
-                keep_from_position = max(0, current_block_end - self.local_attn_size * frame_seqlen)
-                keep_size = current_end - keep_from_position
-
-            kv_cache.evict(keep_size)
             kv_len = kv_cache.total_tokens
 
         elif cache_mode == "read_only":

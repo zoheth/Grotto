@@ -72,23 +72,15 @@ class CausalSelfAttention(nn.Module):
         self,
         incoming_len: int,
         kv_cache: DualPlaneKVCache,
-        current_start: int,
-        current_end: int,
-        grid_sizes: Tuple[int, int, int],
         cache_mode: str = "read_write",
     ) -> None:
         """
         Delegates planning to the backend.
+        KV cache handles sliding window eviction automatically.
         """
-        _, height, width = grid_sizes
-        frame_seqlen = height * width
-
         self.attn_backend.plan(
             incoming_len=incoming_len,
             kv_cache=kv_cache,
-            current_start=current_start,
-            current_end=current_end,
-            frame_seqlen=frame_seqlen,
             cache_mode=cache_mode,
         )
 

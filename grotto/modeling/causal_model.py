@@ -450,7 +450,6 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
 
         # Pre-compute incoming_len once (avoids repeated .shape access and potential CPU-GPU sync)
         incoming_len = x.shape[1]
-        current_end = current_start + incoming_len
 
         # Batch planning: Plan KV cache and attention for ALL blocks upfront
         # This consolidates all CPU operations and potential sync points into one place
@@ -458,9 +457,6 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
             block.self_attn.plan_kv_and_attention(  # type: ignore
                 incoming_len=incoming_len,
                 kv_cache=kv_cache[block_index],
-                current_start=current_start,
-                current_end=current_end,
-                grid_sizes=grid_sizes,
                 cache_mode=cache_mode,
             )  # type: ignore
 
@@ -471,9 +467,6 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
                     kv_cache_translation=kv_cache_keyboard[block_index]
                     if kv_cache_keyboard
                     else None,
-                    current_start=current_start,
-                    current_end=current_end,
-                    grid_sizes=grid_sizes,
                     cache_mode=cache_mode,
                 )  # type: ignore
 

@@ -1,4 +1,5 @@
 from abc import ABC
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -6,6 +7,10 @@ from grotto.modeling.predictor import WanDiffusionPredictor
 from grotto.pipeline.condition_processor import ConditionProcessor
 from grotto.pipeline.config import PipelineConfig
 from grotto.scheduler import FlowMatchScheduler
+
+if TYPE_CHECKING:
+    from grotto.modeling.predictor import WanDiffusionPredictor
+    from grotto.modeling.vae_wrapper import VaeDecoderWrapper
 
 
 class BaseCausalInferencePipeline(torch.nn.Module, ABC):
@@ -24,8 +29,8 @@ class BaseCausalInferencePipeline(torch.nn.Module, ABC):
     def __init__(
         self,
         config: PipelineConfig,
-        predictor: WanDiffusionPredictor,
-        vae_decoder,
+        predictor: "WanDiffusionPredictor",
+        vae_decoder: "VaeDecoderWrapper",
         device: str = "cuda",
     ):
         super().__init__()

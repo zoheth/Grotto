@@ -217,17 +217,11 @@ class MovementInjector(ActionInjector):
         self,
         incoming_len: int,
         kv_cache: "DualPlaneKVCache",
-        current_start: int,
-        current_end: int,
-        grid_sizes: Tuple[int, int, int],  # Unused but kept for interface consistency
         cache_mode: str = "read_write",
     ) -> None:
         self.attn_backend.plan(
             incoming_len=incoming_len,
             kv_cache=kv_cache,
-            current_start=current_start,
-            current_end=current_end,
-            frame_seqlen=1,
             cache_mode=cache_mode,
         )
 
