@@ -69,7 +69,7 @@ class VaeDecoderWrapper(nn.Module):
         self.z_dim = 16
 
         self.conv2 = CausalConv3d(self.z_dim, self.z_dim, 1)
-        self.cache_size = 50
+        self.num_cache_layers: int = 30
 
     def forward(self, z: torch.Tensor, *feat_cache: List):
         """
@@ -105,7 +105,7 @@ class VaeDecoderWrapper(nn.Module):
         if is_valid_cache:
             cache_states = list(feat_cache)
         else:
-            cache_states = [CacheState(size=self.cache_size) for _ in range(4)]
+            cache_states = [CacheState(size=self.num_cache_layers, max_history=2) for _ in range(4)]
             for layer in self.decoder.upsamples:
                 if hasattr(layer, "stream_state"):
                     layer.stream_state.fill_(0)  # type: ignore
@@ -117,6 +117,9 @@ class VaeDecoderWrapper(nn.Module):
 
             frame_latent = x[:, :, i : i + 1, :, :]
             frame_output = self.decoder(frame_latent, cache_states=cache_states)
+
+            for cache_state in cache_states:
+                cache_state.push_frame()  # type: ignore
 
             if out is None:
                 out = frame_output

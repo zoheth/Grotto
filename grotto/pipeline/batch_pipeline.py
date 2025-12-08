@@ -171,7 +171,7 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
         all_num_frames = [self.config.inference.num_frame_per_block] * num_blocks
 
         for _block_idx, current_num_frames in enumerate(tqdm(all_num_frames)):
-            if _block_idx >= 2 and _block_idx % 2 == 0:
+            if _block_idx >= 4 and _block_idx % 2 == 0:
                 visual_cache, mouse_cache, keyboard_cache = self.cache_manager.get_caches()
                 for cache in visual_cache:
                     cache.pop_latent(2)
@@ -179,14 +179,7 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
                     cache.pop_latent(2)
                 for cache in keyboard_cache:
                     cache.pop_latent(2)
-                vae_cache = [None] * len(ZERO_VAE_CACHE)
-                logical_frame_position = 0
-
-                # if vae_cache[0] is not None:
-                #     for cache_obj in vae_cache:
-                #         if hasattr(cache_obj, 'rewind'):
-                #             print("!")
-                #             cache_obj.rewind(2)
+                logical_frame_position = 2 * current_num_frames
 
             noisy_input = noise[
                 :, :, current_start_frame : current_start_frame + current_num_frames

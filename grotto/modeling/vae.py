@@ -11,22 +11,60 @@ CACHE_T = 2
 
 
 class CacheState:
-    """Manages temporal caching for streaming video decoding."""
+    __slots__ = ("_layers", "_frame_count", "_idx", "_max_history")
 
-    def __init__(self, size):
-        self.feat_map: List[Optional[torch.Tensor]] = [None] * size
-        self.idx = 0
+    def __init__(self, size: int, max_history: int = 1):
+        self._layers: List[List[Optional[torch.Tensor]]] = [[] for _ in range(size)]
+        self._frame_count = 0
+        self._idx = 0
+        self._max_history = max_history
+
+    @property
+    def feat_map(self) -> List[Optional[torch.Tensor]]:
+        return [layer[-1] if layer else None for layer in self._layers]
+
+    @property
+    def idx(self) -> int:
+        return self._idx
 
     def reset_index(self):
-        self.idx = 0
+        self._idx = 0
 
-    def get_and_increment(self):
-        idx = self.idx
-        self.idx += 1
+    def get_and_increment(self) -> int:
+        idx = self._idx
+        self._idx += 1
         return idx
 
     def increment_index(self):
-        self.idx += 1
+        self._idx += 1
+
+    def update_layer(self, layer_idx: int, tensor: torch.Tensor):
+        layer_history = self._layers[layer_idx]
+        layer_history.append(tensor)
+        if len(layer_history) > self._max_history:
+            layer_history.pop(0)
+
+    def push_frame(self):
+        self._frame_count += 1
+
+    def pop_frame(self, count: int = 1) -> int:
+        if count <= 0 or self._frame_count == 0:
+            return 0
+
+        actual_pop = min(count, self._frame_count)
+        for layer_history in self._layers:
+            for _ in range(min(actual_pop, len(layer_history))):
+                if layer_history:
+                    layer_history.pop()
+
+        self._frame_count -= actual_pop
+        return actual_pop
+
+    def clear(self):
+        for layer_history in self._layers:
+            layer_history.clear()
+        self._frame_count = 0
+        self._idx = 0
 
 
 class CausalConv3d(nn.Conv3d):
@@ -113,7 +151,7 @@ class CausalConv3d(nn.Conv3d):
                 [past_cache[:, :, -needed:, :, :].to(new_cache.device), new_cache], dim=2
             )
 
-        cache_state.feat_map[idx] = new_cache
+        cache_state.update_layer(idx, new_cache)
 
         padding_to_apply = list(self.padding_tuple)
         T_LEFT_INDEX = 4
@@ -301,7 +339,7 @@ class Resample(nn.Module):
                                 [torch.zeros_like(new_cache).to(new_cache.device), new_cache], dim=2
                             )
 
-                cache_state.feat_map[idx] = new_cache
+                cache_state.update_layer(idx, new_cache)
 
                 if self.stream_state == 0:
                     cache_state.increment_index()
@@ -399,7 +437,7 @@ class VaeDecoder3d(nn.Module):
         cache_middle = cache_states[1] if cache_states is not None else None
         cache_upsamples = cache_states[2] if cache_states is not None else None
         cache_head = cache_states[3] if cache_states is not None and len(cache_states) > 3 else None
-        print(cache_conv1)
+
         x = self.conv1(x, cache_conv1)
 
         for layer in self.middle:

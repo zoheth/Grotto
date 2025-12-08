@@ -410,7 +410,7 @@ def generate_camera_navigation(
 
 def generate_left_right_sequence(
     total_frames: int = 57,
-    frames_per_direction: int = 10,
+    frames_per_direction: int = 12,
     config: CameraControlConfig | None = None,
 ) -> CameraControlTensors:
     if config is None:
