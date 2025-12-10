@@ -48,7 +48,7 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
         batch_size: int,
     ) -> torch.Tensor:
         current_num_frames = noisy_input.shape[2]
-        visual_cache, mouse_cache, keyboard_cache = self.cache_manager.get_caches()
+        visual_cache = self.cache_manager.get_caches()
         current_start = current_start_frame * self.config.model.frame_seq_length
 
         for index, current_timestep in enumerate(self.denoising_step_list):
@@ -63,8 +63,6 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
                 conditional_inputs=conditional_inputs,
                 timestep=timestep,
                 kv_cache=visual_cache,
-                kv_cache_mouse=mouse_cache,
-                kv_cache_keyboard=keyboard_cache,
                 current_start=current_start,
                 cache_mode="read_only",
             )
@@ -103,7 +101,7 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
             * self.config.inference.context_noise
         )
 
-        visual_cache, mouse_cache, keyboard_cache = self.cache_manager.get_caches()
+        visual_cache = self.cache_manager.get_caches()
 
         # Caching phase: append clean K/V to cache
         self.predictor(
@@ -111,8 +109,6 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
             conditional_inputs=conditional_inputs,
             timestep=context_timestep,
             kv_cache=visual_cache,
-            kv_cache_mouse=mouse_cache,
-            kv_cache_keyboard=keyboard_cache,
             current_start=current_start_frame * self.config.model.frame_seq_length,
             cache_mode="read_write",
         )
@@ -171,14 +167,10 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
         all_num_frames = [self.config.inference.num_frame_per_block] * num_blocks
 
         for _block_idx, current_num_frames in enumerate(tqdm(all_num_frames)):
-            # if _block_idx >= 4 and _block_idx % 2 == 0:
-            #     visual_cache, mouse_cache, keyboard_cache = self.cache_manager.get_caches()
+            # if _block_idx >= 6 and _block_idx % 3 == 0:
+            #     visual_cache = self.cache_manager.get_caches()
             #     for cache in visual_cache:
-            #         cache.pop_latent(2)
-            #     for cache in mouse_cache:
-            #         cache.pop_latent(2)
-            #     for cache in keyboard_cache:
-            #         cache.pop_latent(2)
+            #         cache.pop_latent(3)
 
             noisy_input = noise[
                 :, :, logical_frame_position : logical_frame_position + current_num_frames

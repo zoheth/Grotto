@@ -124,7 +124,6 @@ class CausalWanAttentionBlock(nn.Module):
         context: torch.Tensor,
         kv_cache: "DualPlaneKVCache",
         current_start: int = 0,
-        cache_start: Optional[int] = None,
         action_context: Optional[ActionContext] = None,
         cache_mode: str = "read_write",
         incoming_len: Optional[int] = None,
@@ -176,9 +175,7 @@ class CausalWanAttentionBlock(nn.Module):
             x = self._adaln_gated_residual(x, y, gate_msa, f=num_frames)
 
         # Cross-Attention and Action blocks
-        x = self._apply_condition_attn(
-            x, context, grid_sizes, freqs, current_start, action_context, cache_mode
-        )
+        x = self._apply_condition_attn(x, context, grid_sizes, action_context)
 
         # FFN block
         with record_module("FFN"):
@@ -215,10 +212,7 @@ class CausalWanAttentionBlock(nn.Module):
         x: torch.Tensor,
         context: torch.Tensor,
         grid_sizes: tuple,  # (F, H, W)
-        freqs: torch.Tensor,
-        current_start: int,
         action_context: Optional[ActionContext],
-        cache_mode: str,
     ) -> torch.Tensor:
         with record_module("CLIP Cross-Attn"):
             x = x + self.cross_attn(self.norm3(x.to(context.dtype)), context)
@@ -230,21 +224,13 @@ class CausalWanAttentionBlock(nn.Module):
                     "Either pass action_context or use legacy action_kwargs."
                 )
 
-            spatial_tokens_per_frame = int(grid_sizes[1] * grid_sizes[2])
-            start_frame = current_start // spatial_tokens_per_frame
-
             with record_module("Action Module"):
                 x = self.action_model(
                     x.to(context.dtype),
                     grid_sizes,
-                    freqs,
                     rotation=action_context.rotation_cond,
                     translation=action_context.translation_cond,
-                    kv_cache_rotation=action_context.kv_cache_mouse,
-                    kv_cache_translation=action_context.kv_cache_keyboard,
-                    start_frame=start_frame,
                     num_frame_per_block=action_context.num_frame_per_block,
-                    cache_mode=cache_mode,
                 )
 
         return x
@@ -453,16 +439,6 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
                 kv_cache=kv_cache[block_index],
                 cache_mode=cache_mode,
             )  # type: ignore
-
-            if block.action_model is not None and action_context is not None:
-                block.action_model.plan(  # type: ignore
-                    incoming_len=incoming_len,
-                    kv_cache_rotation=kv_cache_mouse[block_index] if kv_cache_mouse else None,
-                    kv_cache_translation=kv_cache_keyboard[block_index]
-                    if kv_cache_keyboard
-                    else None,
-                    cache_mode=cache_mode,
-                )  # type: ignore
 
         # Execute all blocks (pure GPU operations, no more planning/sync inside)
         for block_index, block in enumerate(self.blocks):

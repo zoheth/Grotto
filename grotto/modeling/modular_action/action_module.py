@@ -98,27 +98,13 @@ class ActionModule(nn.Module):
             else None
         )
 
-    def plan(
-        self,
-        incoming_len: int,
-        kv_cache_rotation: "DualPlaneKVCache",
-        kv_cache_translation: "DualPlaneKVCache",
-        cache_mode: str = "read_write",
-    ):
-        pass
-
     def forward(
         self,
         x: torch.Tensor,
         grid_sizes: tuple,
-        freqs: torch.Tensor,
         rotation: Optional[torch.Tensor] = None,
         translation: Optional[torch.Tensor] = None,
-        kv_cache_rotation: Optional["DualPlaneKVCache"] = None,
-        kv_cache_translation: Optional["DualPlaneKVCache"] = None,
-        start_frame: int = 0,
         num_frame_per_block: int = 3,
-        cache_mode: str = "read_write",
     ) -> torch.Tensor:
         """
         Inject camera control conditions into hidden states.
@@ -152,9 +138,6 @@ class ActionModule(nn.Module):
                 condition=rotation,
                 spatial_shape=(th, tw),
                 temporal_shape=tt,
-                is_causal=False,
-                kv_cache=kv_cache_rotation,
-                start_frame=start_frame,
                 num_frame_per_block=num_frame_per_block,
             )
 
@@ -165,9 +148,6 @@ class ActionModule(nn.Module):
                 condition=translation,
                 spatial_shape=(th, tw),
                 temporal_shape=tt,
-                is_causal=False,
-                kv_cache=kv_cache_translation,
-                start_frame=start_frame,
                 num_frame_per_block=num_frame_per_block,
             )
 

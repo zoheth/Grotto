@@ -61,12 +61,6 @@ class CacheConfig:
     use_global_cache: bool = True
     """Whether to use global attention cache"""
 
-    use_mouse_cache: bool = True
-    """Whether to cache mouse action conditioning"""
-
-    use_keyboard_cache: bool = True
-    """Whether to cache keyboard action conditioning"""
-
     def get_visual_cache_size(self, frame_seq_length: int) -> int:
         """
         Calculate the total visual KV cache size.

@@ -505,7 +505,7 @@ def generate_left_right_sequence(
 def generate_stepped_yaw_sequence(
     total_frames: int = 57,
     frames_per_group: int = 36,  # N: 每组的帧数
-    base_yaw: float = 0.05,  # x: 基础旋转值
+    base_yaw: float = 0.1,  # x: 基础旋转值
     config: CameraControlConfig | None = None,
 ) -> CameraControlTensors:
     if config is None:
@@ -516,7 +516,7 @@ def generate_stepped_yaw_sequence(
     current_frame = 0
     # group_idx = 0  # 组索引，从0开始
 
-    direction = -1  # 1表示向右转，-1表示向左转
+    direction = 1  # 1表示向右转，-1表示向左转
     accumulated_yaw = 0.0
 
     while current_frame < total_frames:

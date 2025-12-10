@@ -128,12 +128,8 @@ class PoseAwarePipeline(BatchCausalInferencePipeline):
 
         if frames_to_pop > 0:
             print(frames_to_pop)
-            visual_cache, mouse_cache, keyboard_cache = self.cache_manager.get_caches()
+            visual_cache = self.cache_manager.get_caches()
             for cache in visual_cache:
-                cache.pop_latent(frames_to_pop)
-            for cache in mouse_cache:
-                cache.pop_latent(frames_to_pop)
-            for cache in keyboard_cache:
                 cache.pop_latent(frames_to_pop)
 
             return frames_to_keep  # New logical frame position
@@ -228,12 +224,8 @@ class PoseAwarePipeline(BatchCausalInferencePipeline):
                     frames_to_pop = logical_frame_position - truncate_frame
                     if frames_to_pop > 0:
                         print(frames_to_pop)
-                        visual_cache, mouse_cache, keyboard_cache = self.cache_manager.get_caches()
+                        visual_cache = self.cache_manager.get_caches()
                         for cache in visual_cache:
-                            cache.pop_latent(frames_to_pop // 3)
-                        for cache in mouse_cache:
-                            cache.pop_latent(frames_to_pop // 3)
-                        for cache in keyboard_cache:
                             cache.pop_latent(frames_to_pop // 3)
 
                     self.pose_tracker.truncate_after_block(truncate_block_idx)

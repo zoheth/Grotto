@@ -6,11 +6,12 @@ from einops import rearrange
 from torch import nn
 
 from grotto.modeling.modular_action.action_config import ActionConfig
-from grotto.modeling.modular_action.interfaces import ActionInjector
-from grotto.modeling.modular_action.kernels.preprocessor_kernel import rotation_preprocessor_triton
+from grotto.modeling.modular_action.kernels.preprocessor_kernel import (
+    rotation_preprocessor_triton,
+)
 
 
-class ViewControlInjector(ActionInjector):
+class ViewControlInjector(nn.Module):
     def __init__(
         self,
         action_config: ActionConfig,
@@ -62,13 +63,7 @@ class ViewControlInjector(ActionInjector):
             bias=action_config.qkv_bias,
         )
 
-        if workspace_buffer is None:
-            workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.uint8, device="cuda")
-
-        self.workspace_buffer = workspace_buffer
-        self.flashinfer_wrapper = flashinfer.BatchPrefillWithRaggedKVCacheWrapper(
-            workspace_buffer, "NHD"
-        )
+        # No longer need workspace buffer and wrapper for single_prefill_with_kv_cache
 
     def forward(
         self,
@@ -76,9 +71,6 @@ class ViewControlInjector(ActionInjector):
         condition: Optional[torch.Tensor],
         spatial_shape: Tuple[int, int],
         temporal_shape: int,
-        is_causal: bool = False,
-        kv_cache=None,
-        start_frame: int = 0,
         num_frame_per_block: int = 1,
     ) -> torch.Tensor:
         if condition is None:
@@ -106,33 +98,19 @@ class ViewControlInjector(ActionInjector):
         k = self.k_norm(k).to(v)
 
         BS = B * S
-        q_ragged = q.reshape(BS * T, self.num_heads, self.head_dim)
-        k_ragged = k.reshape(BS * T, self.num_heads, self.head_dim)
 
-        indptr = torch.arange(0, BS + 1, dtype=torch.int32, device=q.device) * T
-        offsets = torch.full((BS,), start_frame, dtype=torch.int32, device=q.device)
+        q_flat = q.reshape(BS * T, self.num_heads, self.head_dim)
+        k_flat = k.reshape(BS * T, self.num_heads, self.head_dim)
+        v_flat = v.reshape(BS * T, self.num_heads, self.head_dim)
 
-        rope_theta = getattr(self.action_config, "rope_theta", 10000.0)
-        roped_q, roped_k = flashinfer.apply_rope(
-            q_ragged, k_ragged, indptr, offsets, interleave=False, rope_theta=rope_theta
+        attn_output = flashinfer.single_prefill_with_kv_cache(
+            q=q_flat,
+            k=k_flat,
+            v=v_flat,
+            causal=False,
+            kv_layout="NHD",
+            pos_encoding_mode="NONE",
         )
-
-        v_ragged = v.reshape(BS * T, self.num_heads, self.head_dim)
-
-        qo_indptr = torch.tensor([0, BS * T], dtype=torch.int32, device=q.device)
-        kv_indptr = torch.tensor([0, BS * T], dtype=torch.int32, device=q.device)
-
-        self.flashinfer_wrapper.plan(
-            qo_indptr,
-            kv_indptr,
-            num_qo_heads=self.num_heads,
-            num_kv_heads=self.num_heads,
-            head_dim_qk=self.head_dim,
-            head_dim_vo=self.head_dim,
-            q_data_type=roped_q.dtype,
-        )
-
-        attn_output = self.flashinfer_wrapper.run(roped_q, roped_k, v_ragged)
 
         attn_output = attn_output.view(BS, T, self.num_heads, self.head_dim)
         attn_output = rearrange(attn_output, "(B S) T H D -> B (T S) (H D)", B=B, S=S)

@@ -20,14 +20,10 @@ class CacheManager:
         self.dtype = dtype
 
         self.visual_cache: List[DualPlaneKVCache]
-        self.mouse_cache: List[DualPlaneKVCache]
-        self.keyboard_cache: List[DualPlaneKVCache]
 
     def initialize_all_caches(self, batch_size: int = 1) -> None:
         assert batch_size == 1
         self.visual_cache = self._create_dual_plane_kv_cache()
-        self.mouse_cache = self._create_action_mouse_cache()
-        self.keyboard_cache = self._create_action_keyboard_cache()
 
     def _create_dual_plane_kv_cache(self) -> List[DualPlaneKVCache]:
         cache_size = self.cache_config.get_visual_cache_size(self.model_config.frame_seq_length)
@@ -48,43 +44,6 @@ class CacheManager:
             for _ in range(self.model_config.num_transformer_blocks)
         ]
 
-    def _create_action_mouse_cache(self) -> List[DualPlaneKVCache]:
-        # mouse is self-attention
-        cache_size = self.model_config.frame_seq_length * 3
-        num_heads = self.model_config.num_action_attention_heads
-        head_dim = self.model_config.action_head_dim
-        incoming_len = self.model_config.frame_seq_length * 3
-
-        return [
-            DualPlaneKVCache(
-                max_seq_len=cache_size,
-                max_incoming_len=incoming_len,
-                num_heads=num_heads,
-                head_dim=head_dim,
-                tokens_per_latent=incoming_len,
-                dtype=self.dtype,
-                device=self.device,
-            )
-            for _ in range(self.model_config.num_transformer_blocks)
-        ]
-
-    def _create_action_keyboard_cache(self) -> List[DualPlaneKVCache]:
-        num_heads = self.model_config.num_action_attention_heads
-        head_dim = self.model_config.action_head_dim
-
-        return [
-            DualPlaneKVCache(
-                max_seq_len=3,
-                max_incoming_len=3,
-                num_heads=num_heads,
-                head_dim=head_dim,
-                tokens_per_latent=3,
-                dtype=self.dtype,
-                device=self.device,
-            )
-            for _ in range(self.model_config.num_transformer_blocks)
-        ]
-
     def is_initialized(self) -> bool:
         return len(self.visual_cache) > 0
 
@@ -92,15 +51,7 @@ class CacheManager:
         for block_cache in self.visual_cache:
             block_cache.reset()
 
-        for block_cache in self.mouse_cache:
-            block_cache.reset()
-
-        for block_cache in self.keyboard_cache:
-            block_cache.reset()
-
-    def get_caches(
-        self,
-    ) -> tuple[List[DualPlaneKVCache], List[DualPlaneKVCache], List[DualPlaneKVCache]]:
-        if self.visual_cache is None or self.mouse_cache is None or self.keyboard_cache is None:
+    def get_caches(self) -> List[DualPlaneKVCache]:
+        if self.visual_cache is None:
             raise RuntimeError("Caches must be initialized before access")
-        return (self.visual_cache, self.mouse_cache, self.keyboard_cache)
+        return self.visual_cache

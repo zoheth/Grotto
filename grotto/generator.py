@@ -23,6 +23,9 @@ from grotto.modeling.weight_mapping_config import (
 )
 from grotto.pipeline import PipelineConfig
 from grotto.pipeline.batch_pipeline import BatchCausalInferencePipeline
+
+# from grotto.pipeline.pose_aware_pipeline import PoseAwarePipeline
+# from grotto.camera_pose import CameraPose
 from grotto.profiling import record_module
 from grotto.types import ConditionalInputs
 
@@ -83,7 +86,7 @@ class VideoGenerator:
         #     vae_decoder=vae_decoder,
         #     device="cuda",
         #     initial_pose=CameraPose.identity(),
-        #     enable_pose_adjustment=False,
+        #     enable_pose_adjustment=True,
         # ).to(device=self.device, dtype=self.weight_dtype)
 
         self.pipeline = BatchCausalInferencePipeline(
@@ -189,8 +192,8 @@ class VideoGenerator:
                 [1, 16, num_frames, 44, 80], device=self.device, dtype=self.weight_dtype
             )
             num_video_frames = (num_frames - 1) * 4 + 1
+            # camera_control = generate_stepped_yaw_sequence(num_video_frames).unsqueeze_batch()
             camera_control = generate_camera_navigation(num_video_frames).unsqueeze_batch()
-            # camera_control = generate_left_right_sequence(num_video_frames).unsqueeze_batch()
 
             # Save camera control if path is provided
             if save_camera_control_path is not None:
