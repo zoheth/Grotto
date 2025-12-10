@@ -23,7 +23,7 @@ class ActionConfig:
 
     patch_size: List[int] = field(default_factory=lambda: [1, 2, 2])
     rope_dim_list: List[int] = field(default_factory=lambda: [8, 28, 28])
-    rope_theta: int = 10000  # Increased from 256 to support longer sequences
+    rope_theta: int = 256  # Increased from 256 to support longer sequences
 
     qk_norm: bool = True
     qkv_bias: bool = False

@@ -93,7 +93,7 @@ class AttentionWithCache(nn.Module):
         else:
             # Should be caught in plan(), but double check safety
             raise ValueError(f"Invalid cache_mode: {cache_mode}")
-        print(k_linear.shape)
+
         # 2. Run FlashInfer attention
         q_for_flash = roped_q.squeeze(0)
         x = self.flashinfer_wrapper.run(q_for_flash, k_linear, v_linear)

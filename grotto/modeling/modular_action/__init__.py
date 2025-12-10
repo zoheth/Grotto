@@ -13,10 +13,7 @@ from grotto.modeling.modular_action.movement_control import (
     MovementInjector,
     MovementPreprocessor,
 )
-from grotto.modeling.modular_action.view_control import (
-    ViewControlInjector,
-    ViewControlPreprocessor,
-)
+from grotto.modeling.modular_action.view_control import ViewControlInjector
 
 __all__ = [
     # Main module
@@ -27,7 +24,6 @@ __all__ = [
     # Injectors
     "ViewControlInjector",
     "MovementInjector",
-    "ViewControlPreprocessor",
     "MovementPreprocessor",
     # Core components
     "ActionInjector",

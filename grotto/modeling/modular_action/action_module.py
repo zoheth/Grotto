@@ -105,13 +105,7 @@ class ActionModule(nn.Module):
         kv_cache_translation: "DualPlaneKVCache",
         cache_mode: str = "read_write",
     ):
-        if self.view_control_injector is not None and kv_cache_rotation is not None:
-            self.view_control_injector.plan_kv_and_attention(
-                incoming_len, kv_cache_rotation, cache_mode
-            )
-
-        if self.movement_injector is not None and kv_cache_translation is not None:
-            self.movement_injector.plan_kv_and_attention(3, kv_cache_translation, cache_mode)
+        pass
 
     def forward(
         self,
@@ -149,14 +143,6 @@ class ActionModule(nn.Module):
             tt * th * tw == x.shape[1]
         ), f"Sequence length mismatch: {tt}*{th}*{tw}={tt * th * tw} != {x.shape[1]}"
 
-        # Convert freqs to cos/sin for FlashInfer
-        if freqs.is_complex():
-            freqs_cos = freqs.real.float()
-            freqs_sin = freqs.imag.float()
-        else:
-            freqs_cos = torch.cos(freqs.float())
-            freqs_sin = torch.sin(freqs.float())
-
         hidden_states = x
 
         # View control injection (camera rotation)
@@ -166,11 +152,10 @@ class ActionModule(nn.Module):
                 condition=rotation,
                 spatial_shape=(th, tw),
                 temporal_shape=tt,
-                freqs=freqs,
+                is_causal=False,
                 kv_cache=kv_cache_rotation,
                 start_frame=start_frame,
                 num_frame_per_block=num_frame_per_block,
-                cache_mode=cache_mode,
             )
 
         # Movement injection (camera translation)
@@ -180,13 +165,10 @@ class ActionModule(nn.Module):
                 condition=translation,
                 spatial_shape=(th, tw),
                 temporal_shape=tt,
-                freqs=freqs,
-                freqs_cos=freqs_cos,
-                freqs_sin=freqs_sin,
+                is_causal=False,
                 kv_cache=kv_cache_translation,
                 start_frame=start_frame,
                 num_frame_per_block=num_frame_per_block,
-                cache_mode=cache_mode,
             )
 
         return hidden_states

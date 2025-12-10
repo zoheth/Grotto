@@ -50,7 +50,7 @@ class CacheManager:
 
     def _create_action_mouse_cache(self) -> List[DualPlaneKVCache]:
         # mouse is self-attention
-        cache_size = self.cache_config.get_visual_cache_size(self.model_config.frame_seq_length)
+        cache_size = self.model_config.frame_seq_length * 3
         num_heads = self.model_config.num_action_attention_heads
         head_dim = self.model_config.action_head_dim
         incoming_len = self.model_config.frame_seq_length * 3
@@ -69,13 +69,12 @@ class CacheManager:
         ]
 
     def _create_action_keyboard_cache(self) -> List[DualPlaneKVCache]:
-        cache_size = self.cache_config.get_action_cache_size()
         num_heads = self.model_config.num_action_attention_heads
         head_dim = self.model_config.action_head_dim
 
         return [
             DualPlaneKVCache(
-                max_seq_len=cache_size,
+                max_seq_len=3,
                 max_incoming_len=3,
                 num_heads=num_heads,
                 head_dim=head_dim,

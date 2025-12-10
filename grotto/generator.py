@@ -9,7 +9,8 @@ from einops import rearrange
 from safetensors.torch import load_file
 from torchvision.transforms import v2
 
-from grotto.camera_control import generate_stepped_yaw_sequence
+# from grotto.camera_control import generate_stepped_yaw_sequence
+from grotto.camera_control import generate_camera_navigation
 from grotto.camera_control_export import save_for_matrix_game
 
 # from grotto.camera_control import generate_left_right_sequence
@@ -188,7 +189,7 @@ class VideoGenerator:
                 [1, 16, num_frames, 44, 80], device=self.device, dtype=self.weight_dtype
             )
             num_video_frames = (num_frames - 1) * 4 + 1
-            camera_control = generate_stepped_yaw_sequence(num_video_frames).unsqueeze_batch()
+            camera_control = generate_camera_navigation(num_video_frames).unsqueeze_batch()
             # camera_control = generate_left_right_sequence(num_video_frames).unsqueeze_batch()
 
             # Save camera control if path is provided
