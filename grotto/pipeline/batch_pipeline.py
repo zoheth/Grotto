@@ -171,18 +171,17 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
         all_num_frames = [self.config.inference.num_frame_per_block] * num_blocks
 
         for _block_idx, current_num_frames in enumerate(tqdm(all_num_frames)):
-            if _block_idx >= 4 and _block_idx % 2 == 0:
-                visual_cache, mouse_cache, keyboard_cache = self.cache_manager.get_caches()
-                for cache in visual_cache:
-                    cache.pop_latent(2)
-                for cache in mouse_cache:
-                    cache.pop_latent(2)
-                for cache in keyboard_cache:
-                    cache.pop_latent(2)
-                logical_frame_position = 2 * current_num_frames
+            # if _block_idx >= 4 and _block_idx % 2 == 0:
+            #     visual_cache, mouse_cache, keyboard_cache = self.cache_manager.get_caches()
+            #     for cache in visual_cache:
+            #         cache.pop_latent(2)
+            #     for cache in mouse_cache:
+            #         cache.pop_latent(2)
+            #     for cache in keyboard_cache:
+            #         cache.pop_latent(2)
 
             noisy_input = noise[
-                :, :, current_start_frame : current_start_frame + current_num_frames
+                :, :, logical_frame_position : logical_frame_position + current_num_frames
             ]
 
             block_cond, _ = self.condition_processor.slice_block_conditions(
@@ -202,6 +201,10 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
             )
 
             video, vae_cache = self._decode_latent_to_video(denoised_pred, vae_cache)
+            # print(video.shape)
+            # if _block_idx >= 4 and _block_idx % 2 == 0:
+            #     video = video[:, 4:, :, :, :]
+            # if _block_idx==4 or _block_idx==5:
             videos.append(video)
 
             current_start_frame += current_num_frames

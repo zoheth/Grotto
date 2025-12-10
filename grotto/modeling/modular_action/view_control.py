@@ -190,9 +190,6 @@ class ViewControlInjector(ActionInjector):
             workspace_buffer, "NHD"
         )
 
-        # Cache configuration
-        self.max_attention_size = action_config.local_attn_size
-
         self.register_buffer(
             "local_indices", torch.arange(self.block_seq_len, dtype=torch.int32), persistent=False
         )
@@ -202,7 +199,6 @@ class ViewControlInjector(ActionInjector):
             head_dim=self.head_dim,
             num_frame_per_block=self.num_frame_per_block,
             block_seq_len=self.block_seq_len,
-            local_attn_size=action_config.local_attn_size,
             workspace_buffer=workspace_buffer,
         )
 
@@ -283,7 +279,7 @@ class ViewControlInjector(ActionInjector):
         indptr = torch.arange(0, BS + 1, dtype=torch.int32, device=q.device) * T
         offsets = torch.full((BS,), start_frame, dtype=torch.int32, device=q.device)
 
-        rope_theta = getattr(self.action_config, "rope_theta", 256.0)
+        rope_theta = getattr(self.action_config, "rope_theta", 10000.0)
         roped_q, roped_k = flashinfer.apply_rope(
             q_ragged, k_ragged, indptr, offsets, interleave=False, rope_theta=rope_theta
         )

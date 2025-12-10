@@ -37,3 +37,4 @@ venv
 *.onnx
 
 demo_images/
+outputs/

@@ -9,8 +9,10 @@ from einops import rearrange
 from safetensors.torch import load_file
 from torchvision.transforms import v2
 
-# from grotto.camera_control import generate_camera_navigation
-from grotto.camera_control import generate_left_right_sequence
+from grotto.camera_control import generate_stepped_yaw_sequence
+from grotto.camera_control_export import save_for_matrix_game
+
+# from grotto.camera_control import generate_left_right_sequence
 from grotto.modeling.predictor import WanDiffusionPredictor
 from grotto.modeling.vae_wrapper import VaeDecoderWrapper, create_wan_encoder
 from grotto.modeling.weight_mapping_config import (
@@ -18,7 +20,8 @@ from grotto.modeling.weight_mapping_config import (
     apply_mapping,
     detect_old_predictor_format,
 )
-from grotto.pipeline import BatchCausalInferencePipeline, PipelineConfig
+from grotto.pipeline import PipelineConfig
+from grotto.pipeline.batch_pipeline import BatchCausalInferencePipeline
 from grotto.profiling import record_module
 from grotto.types import ConditionalInputs
 
@@ -73,8 +76,22 @@ class VideoGenerator:
 
         vae_decoder = self._load_vae_decoder(vae_dir, vae_compile_mode)
 
+        # self.pipeline = PoseAwarePipeline(
+        #     config=self.config,
+        #     predictor=predictor,
+        #     vae_decoder=vae_decoder,
+        #     device="cuda",
+        #     initial_pose=CameraPose.identity(),
+        #     enable_pose_adjustment=False,
+        # ).to(device=self.device, dtype=self.weight_dtype)
+
         self.pipeline = BatchCausalInferencePipeline(
-            config=self.config, predictor=predictor, vae_decoder=vae_decoder, device="cuda"
+            config=self.config,
+            predictor=predictor,
+            vae_decoder=vae_decoder,
+            device="cuda",
+            # initial_pose=CameraPose.identity(),
+            # enable_pose_adjustment=True,
         ).to(device=self.device, dtype=self.weight_dtype)
 
         self.pipeline.vae_decoder.to(torch.float16)
@@ -132,7 +149,9 @@ class VideoGenerator:
         return image.crop((left, top, left + new_w, top + new_h))
 
     @torch.no_grad()
-    def generate(self, image: PIL.Image.Image, num_frames=150, seed=0):
+    def generate(
+        self, image: PIL.Image.Image, num_frames=150, seed=0, save_camera_control_path=None
+    ):
         # Image preprocessing
         with record_module("Image Preprocessing"):
             image = self._resizecrop(image, 352, 640)
@@ -169,8 +188,12 @@ class VideoGenerator:
                 [1, 16, num_frames, 44, 80], device=self.device, dtype=self.weight_dtype
             )
             num_video_frames = (num_frames - 1) * 4 + 1
-            # camera_control = generate_camera_navigation(num_video_frames).unsqueeze_batch()
-            camera_control = generate_left_right_sequence(num_video_frames).unsqueeze_batch()
+            camera_control = generate_stepped_yaw_sequence(num_video_frames).unsqueeze_batch()
+            # camera_control = generate_left_right_sequence(num_video_frames).unsqueeze_batch()
+
+            # Save camera control if path is provided
+            if save_camera_control_path is not None:
+                save_for_matrix_game(camera_control, save_camera_control_path)
 
             conditional_inputs = ConditionalInputs(
                 cond_concat=cond_concat,

@@ -17,7 +17,6 @@ class CausalSelfAttention(nn.Module):
         dim: int,
         num_heads: int,
         num_frame_per_block: int,
-        local_attn_size: int = -1,
         sink_size: int = 0,
         qk_norm: bool = True,
         eps: float = 1e-6,
@@ -60,7 +59,6 @@ class CausalSelfAttention(nn.Module):
             head_dim=self.head_dim,
             num_frame_per_block=num_frame_per_block,
             block_seq_len=q_len,
-            local_attn_size=local_attn_size,
             workspace_buffer=workspace_buffer,
         )
 

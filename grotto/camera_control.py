@@ -294,6 +294,8 @@ class NavigationPatternGenerator:
                     delta = self.config.rotation.action_to_delta[action]
                     rotation[:, 0] = delta[0]  # pitch
                     rotation[:, 1] = delta[1]  # yaw
+                    # rotation[:, 0] = 0.0  # pitch
+                    # rotation[:, 1] = 0.0  # yaw
             result["rotation"] = rotation
 
         return result
@@ -435,5 +437,96 @@ def generate_left_right_sequence(
 
         current_frame = segment_end
         going_right = not going_right
+
+    return sequence.to_tensors()
+
+
+# def generate_stepped_yaw_sequence(
+#     total_frames: int = 57,
+#     frames_per_group: int = 12,  # N: 每组的帧数
+#     base_yaw: float = 0.05,       # x: 基础旋转值
+#     config: CameraControlConfig | None = None,
+# ) -> CameraControlTensors:
+#     """
+#     Generate a sequence with stepped yaw (horizontal rotation) impulses.
+
+#     Logic:
+#     - Group 0: All frames have yaw = x
+#     - Group 1: 1st frame has yaw = 1 * N * x, others = x
+#     - Group 2: 1st frame has yaw = 2 * N * x, others = x
+#     - ...
+
+#     Args:
+#         total_frames: Total number of frames.
+#         frames_per_group: The size of each group (N).
+#         base_yaw: The base rotation delta (x).
+#         config: Camera configuration.
+#     """
+#     if config is None:
+#         config = STANDARD_CAMERA_CONFIG
+
+#     sequence = CameraControlSequence(config, total_frames)
+
+#     # 初始化第0帧为静止状态
+#     for _ in range(21):
+#         sequence.set_frame(0, translation=[0.0] * 4, rotation=[0.0, 0.0])
+
+#     current_frame = 21
+#     group_idx = 0  # 组索引，从0开始
+
+#     while current_frame < total_frames:
+#         # 计算当前组的结束帧
+#         segment_end = min(current_frame + frames_per_group, total_frames)
+
+#         # 遍历当前组内的每一帧
+#         for i, frame_idx in enumerate(range(current_frame, segment_end)):
+#             # 默认旋转值 x
+#             yaw_value = base_yaw
+
+#             # 如果是该组的第一帧 (i==0) 且不是第一组 (group_idx > 0)
+#             # 计算突变值: 组索引 * N * x
+#             if i == 0 and group_idx > 0:
+#                 yaw_value = group_idx * 3 * base_yaw
+
+#             # 设置帧数据：位移全为0，旋转仅设置Yaw (index 1)
+#             # Rotation format is (pitch, yaw)
+#             sequence.set_frame(
+#                 frame_idx,
+#                 translation=[0.0, 0.0, 0.0, 0.0],
+#                 rotation=[0.0, yaw_value]
+#             )
+
+#         current_frame = segment_end
+#         group_idx += 1
+
+#     return sequence.to_tensors()
+
+
+def generate_stepped_yaw_sequence(
+    total_frames: int = 57,
+    frames_per_group: int = 36,  # N: 每组的帧数
+    base_yaw: float = 0.05,  # x: 基础旋转值
+    config: CameraControlConfig | None = None,
+) -> CameraControlTensors:
+    if config is None:
+        config = STANDARD_CAMERA_CONFIG
+
+    sequence = CameraControlSequence(config, total_frames)
+
+    current_frame = 0
+    # group_idx = 0  # 组索引，从0开始
+
+    direction = -1  # 1表示向右转，-1表示向左转
+    accumulated_yaw = 0.0
+
+    while current_frame < total_frames:
+        delta_yaw = base_yaw * direction
+        sequence.set_frame(
+            current_frame, translation=[0.0, 0.0, 0.0, 0.0], rotation=[0.0, delta_yaw]
+        )
+        accumulated_yaw += delta_yaw
+        if abs(accumulated_yaw) >= frames_per_group * base_yaw:
+            direction *= -1
+        current_frame += 1
 
     return sequence.to_tensors()

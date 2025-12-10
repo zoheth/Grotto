@@ -197,9 +197,6 @@ class MovementInjector(ActionInjector):
             workspace_buffer, "NHD"
         )
 
-        # Cache configuration
-        self.max_attention_size = action_config.local_attn_size
-
         self.register_buffer(
             "local_indices", torch.arange(self.block_seq_len, dtype=torch.int32), persistent=False
         )
@@ -209,7 +206,6 @@ class MovementInjector(ActionInjector):
             head_dim=self.head_dim,
             num_frame_per_block=self.num_frame_per_block,
             block_seq_len=self.block_seq_len,
-            local_attn_size=action_config.local_attn_size,
             workspace_buffer=workspace_buffer,
         )
 

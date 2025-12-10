@@ -66,12 +66,19 @@ def main(
         trace_path = str(trace_dir / f"grotto_{timestamp}")
 
         with profiling_session(trace_path):
-            video = generator.generate(image, num_output_frames)
+            video = generator.generate(
+                image,
+                num_output_frames,
+                save_camera_control_path=str(output_folder / "camera_control.pt"),
+            )
 
         print(f"Profile: {trace_path}.json")
     else:
-        video = generator.generate(image, num_output_frames)
-
+        video = generator.generate(
+            image,
+            num_output_frames,
+            save_camera_control_path=str(output_folder / "camera_control.pt"),
+        )
     process_video(video.astype(np.uint8), output_folder / "demo.mp4")
 
     print("Done")

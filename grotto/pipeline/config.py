@@ -77,7 +77,7 @@ class CacheConfig:
         Returns:
             Total cache size in tokens
         """
-        return self.local_attn_size * frame_seq_length
+        return self.local_attn_size * frame_seq_length * 3
 
     def get_action_cache_size(self) -> int:
         """
@@ -86,7 +86,7 @@ class CacheConfig:
         Returns:
             Action cache size in tokens
         """
-        return self.local_attn_size
+        return self.local_attn_size * 3
 
 
 @dataclass

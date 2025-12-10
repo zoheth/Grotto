@@ -46,9 +46,7 @@ class ConditionProcessor:
         action_seq_len = self.get_action_sequence_length(current_block_end)
 
         block_cond = ConditionalInputs(
-            cond_concat=conditional_inputs.cond_concat[
-                :, :, current_start_frame : current_start_frame + num_frames
-            ],
+            cond_concat=conditional_inputs.cond_concat[:, :, current_start_frame:current_block_end],
             visual_context=conditional_inputs.visual_context,
             rotation_cond=conditional_inputs.rotation_cond[:, :action_seq_len]
             if conditional_inputs.rotation_cond is not None

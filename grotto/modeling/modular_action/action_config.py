@@ -23,14 +23,14 @@ class ActionConfig:
 
     patch_size: List[int] = field(default_factory=lambda: [1, 2, 2])
     rope_dim_list: List[int] = field(default_factory=lambda: [8, 28, 28])
-    rope_theta: int = 256
+    rope_theta: int = 10000  # Increased from 256 to support longer sequences
 
     qk_norm: bool = True
     qkv_bias: bool = False
 
     vae_time_compression_ratio: int = 4
     windows_size: int = 3
-    local_attn_size: int = 6
+    # local_attn_size: int = 6
 
     def __post_init__(self):
         head_dim = self.img_hidden_size // self.heads_num

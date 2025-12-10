@@ -50,7 +50,6 @@ class CausalWanAttentionBlock(nn.Module):
         ffn_dim,
         num_heads,
         num_frame_per_block,
-        local_attn_size=-1,
         sink_size=0,
         qk_norm=True,
         cross_attn_norm=False,
@@ -67,13 +66,12 @@ class CausalWanAttentionBlock(nn.Module):
         self.dim = dim
         self.ffn_dim = ffn_dim
         self.num_heads = num_heads
-        self.local_attn_size = local_attn_size
         self.qk_norm = qk_norm
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
 
         if len(action_config) != 0 and block_idx in action_config["blocks"]:
-            config_dict = {**action_config, "local_attn_size": local_attn_size}
+            config_dict = {**action_config}
             self.action_model = ActionModule(
                 ActionConfig.from_dict(config_dict),
                 num_frame_per_block=num_frame_per_block,
@@ -94,7 +92,6 @@ class CausalWanAttentionBlock(nn.Module):
             dim,
             num_heads,
             num_frame_per_block,
-            local_attn_size,
             sink_size,
             qk_norm,
             eps,
@@ -317,7 +314,6 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
         out_dim=16,
         num_heads=12,
         num_layers=30,
-        local_attn_size=-1,
         sink_size=0,
         num_frame_per_block=3,
         height=22,
@@ -344,7 +340,6 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
         self.out_dim = out_dim
         self.num_heads = num_heads
         self.num_layers = num_layers
-        self.local_attn_size = local_attn_size
         self.num_frame_per_block = num_frame_per_block
         self.height = height
         self.width = width
@@ -370,7 +365,6 @@ class CausalWanModel(ModelMixin, ConfigMixin, FromOriginalModelMixin, PeftAdapte
                     ffn_dim,
                     num_heads,
                     self.num_frame_per_block,
-                    local_attn_size,
                     sink_size,
                     qk_norm,
                     cross_attn_norm,

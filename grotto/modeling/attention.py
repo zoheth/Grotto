@@ -14,14 +14,12 @@ class AttentionWithCache(nn.Module):
         head_dim: int,
         num_frame_per_block: int,
         block_seq_len: int,  # frame_seq_len * num_frame_per_block
-        local_attn_size: int = -1,
         workspace_buffer: Optional[torch.Tensor] = None,
     ):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.num_frame_per_block = num_frame_per_block
-        self.local_attn_size = local_attn_size
 
         # Buffer initialization
         if workspace_buffer is None:
@@ -95,7 +93,7 @@ class AttentionWithCache(nn.Module):
         else:
             # Should be caught in plan(), but double check safety
             raise ValueError(f"Invalid cache_mode: {cache_mode}")
-
+        print(k_linear.shape)
         # 2. Run FlashInfer attention
         q_for_flash = roped_q.squeeze(0)
         x = self.flashinfer_wrapper.run(q_for_flash, k_linear, v_linear)
