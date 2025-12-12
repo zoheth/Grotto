@@ -39,6 +39,7 @@ class PoseAwarePipeline(BatchCausalInferencePipeline):
         initial_pose: Optional[CameraPose] = None,
         enable_pose_adjustment: bool = True,
         max_history_length: int = 8,
+        distance_threshold: float = 0.1,
     ):
         """
         Initialize pose-aware pipeline.
@@ -51,12 +52,17 @@ class PoseAwarePipeline(BatchCausalInferencePipeline):
             initial_pose: Starting camera pose
             enable_pose_adjustment: Enable pose-based action adjustment
             max_history_length: Maximum history length to maintain (default: 8)
+            distance_threshold: Distance threshold for triggering rollback (default: 0.1)
+                Rollback only occurs when predicted pose distance < threshold
         """
         super().__init__(config, predictor, vae_decoder, device)
         self.pose_tracker = PoseTracker(initial_pose)
-        self.pose_adjuster = PoseActionAdjuster(self.pose_tracker, max_history_length)
+        self.pose_adjuster = PoseActionAdjuster(
+            self.pose_tracker, max_history_length, distance_threshold
+        )
         self.enable_pose_adjustment = enable_pose_adjustment
         self.max_history_length = max_history_length
+        self.distance_threshold = distance_threshold
 
     def _extract_action_at_index(
         self, conditional_inputs: ConditionalInputs, action_index: int, batch_idx: int = 0
@@ -241,7 +247,7 @@ class PoseAwarePipeline(BatchCausalInferencePipeline):
             ]
 
             block_cond, _ = self.condition_processor.slice_block_conditions(
-                conditional_inputs, logical_frame_position, current_num_frames
+                conditional_inputs, current_start_frame, current_num_frames
             )
 
             denoised_pred = self._denoise_block(

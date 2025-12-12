@@ -502,9 +502,9 @@ def generate_left_right_sequence(
 #     return sequence.to_tensors()
 
 
-def generate_stepped_yaw_sequence(
+def generate_left_right_yaw_sequence(
     total_frames: int = 57,
-    frames_per_group: int = 36,  # N: 每组的帧数
+    frames_per_group: int = 48,  # N: 每组的帧数
     base_yaw: float = 0.1,  # x: 基础旋转值
     config: CameraControlConfig | None = None,
 ) -> CameraControlTensors:
@@ -513,20 +513,36 @@ def generate_stepped_yaw_sequence(
 
     sequence = CameraControlSequence(config, total_frames)
 
-    current_frame = 0
-    # group_idx = 0  # 组索引，从0开始
+    for _ in range(12):
+        sequence.set_frame(0, translation=[0.0] * 4, rotation=[0.0, 0.0])
+
+    current_frame = 9
+    group_idx = 0  # 组索引，从0开始
+    idx = 0
 
     direction = 1  # 1表示向右转，-1表示向左转
-    accumulated_yaw = 0.0
+    # accumulated_yaw = 0.0
 
     while current_frame < total_frames:
         delta_yaw = base_yaw * direction
+        # if direction == -1 and idx < 4:
+        #     delta_yaw = delta_yaw * -1 * (frames_per_group / 4)
+        # else:
+        #     accumulated_yaw += delta_yaw
+
         sequence.set_frame(
             current_frame, translation=[0.0, 0.0, 0.0, 0.0], rotation=[0.0, delta_yaw]
         )
-        accumulated_yaw += delta_yaw
-        if abs(accumulated_yaw) >= frames_per_group * base_yaw:
-            direction *= -1
+
+        idx += 1
+        if idx >= frames_per_group:
+            idx = 0
+            group_idx += 1
+            direction *= -1  # 切换方向
         current_frame += 1
+
+        # if abs(accumulated_yaw) >= base_yaw * frames_per_group * 3:
+        #     direction *= -1
+        #     accumulated_yaw = 0.0
 
     return sequence.to_tensors()

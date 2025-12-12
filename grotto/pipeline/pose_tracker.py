@@ -103,9 +103,15 @@ class PoseTracker:
 class PoseActionAdjuster:
     """Adjusts actions based on pose history to maintain temporal consistency."""
 
-    def __init__(self, pose_tracker: PoseTracker, max_history_length: int = 8):
+    def __init__(
+        self,
+        pose_tracker: PoseTracker,
+        max_history_length: int = 8,
+        distance_threshold: float = 0.1,
+    ):
         self.pose_tracker = pose_tracker
         self.max_history_length = max_history_length
+        self.distance_threshold = distance_threshold
 
     def adjust_first_action_and_get_cache_truncation(
         self,
@@ -139,6 +145,20 @@ class PoseActionAdjuster:
         )
         if hist_idx == -1:
             return first_action_translation, first_action_rotation, None
+
+        # Check if the pose is close enough to trigger rollback
+        if distance >= self.distance_threshold:
+            print(
+                f"[PoseAdjuster] Distance {distance:.4f} >= threshold {self.distance_threshold}, "
+                "no rollback"
+            )
+            return first_action_translation, first_action_rotation, None
+
+        # Pose is close enough, compute adjusted action
+        print(
+            f"[PoseAdjuster] Distance {distance:.4f} < threshold {self.distance_threshold}, "
+            f"triggering rollback to block {hist_entry.block_idx}"
+        )
 
         adjusted_transform = compute_transform(hist_entry.pose, predicted_pose)
         adjusted_translation = self._translation_3d_to_action(adjusted_transform.translation)

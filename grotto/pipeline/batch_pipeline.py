@@ -167,17 +167,19 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
         all_num_frames = [self.config.inference.num_frame_per_block] * num_blocks
 
         for _block_idx, current_num_frames in enumerate(tqdm(all_num_frames)):
-            # if _block_idx >= 6 and _block_idx % 3 == 0:
-            #     visual_cache = self.cache_manager.get_caches()
-            #     for cache in visual_cache:
-            #         cache.pop_latent(3)
+            if _block_idx >= 6 and _block_idx <= 7:
+                visual_cache = self.cache_manager.get_caches()
+                for cache in visual_cache:
+                    cache.pop_latent(_block_idx - 4)
+                logical_frame_position -= (_block_idx - 4) * current_num_frames
+            print(logical_frame_position)
 
             noisy_input = noise[
-                :, :, logical_frame_position : logical_frame_position + current_num_frames
+                :, :, current_start_frame : current_start_frame + current_num_frames
             ]
 
             block_cond, _ = self.condition_processor.slice_block_conditions(
-                conditional_inputs, logical_frame_position, current_num_frames
+                conditional_inputs, current_start_frame, current_num_frames
             )
 
             denoised_pred = self._denoise_block(
