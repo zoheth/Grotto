@@ -28,6 +28,18 @@ class PoseAwarePipeline(BatchCausalInferencePipeline):
     1. Tracks camera pose throughout inference
     2. Before each block, checks if first action leads to pose close to history
     3. If close match found, adjusts action to match exactly and truncates cache
+
+    Frame Terminology:
+    - Video frames: Original video frames (e.g., 1920x1080 images)
+    - Latent frames: VAE-encoded frames (compressed representation)
+    - Relationship: 1 latent frame = 4 video frames (temporal_compression=4)
+
+    Pipeline Structure:
+    - Inference is divided into blocks
+    - Each block generates num_frame_per_block latent frames (typically 3)
+    - 1 block = 1 KV cache unit = 3 latent frames = 12 video frames
+    - logical_frame_position tracks total latent frames generated so far
+    - cache.pop_latent(n) pops n BLOCKS (not latent frames), so conversion needed
     """
 
     def __init__(
@@ -112,34 +124,54 @@ class PoseAwarePipeline(BatchCausalInferencePipeline):
             conditional_inputs.rotation_cond[batch_idx, action_index] = new_rotation
         return conditional_inputs
 
-    def _truncate_cache_at_action_index(self, action_index: int, current_logical_frame: int):
+    def _latent_frames_per_block(self) -> int:
         """
-        Truncate KV cache to correspond to a specific action index.
+        Get the number of latent frames generated per block.
+
+        Returns:
+            Number of latent frames per block
+        """
+        return self.config.inference.num_frame_per_block
+
+    def _block_to_latent_frames(self, block_idx: int) -> int:
+        """
+        Convert block index to number of latent frames.
 
         Args:
-            action_index: Action index to truncate after
-            current_logical_frame: Current logical frame position
+            block_idx: Block index (0-indexed)
+
+        Returns:
+            Number of latent frames up to and including this block
         """
-        # Convert action index to frame index
-        # action_length = 1 + temporal_compression * (frames - 1)
-        # Solving for frames: frames = (action_length - 1) / temporal_compression + 1
-        temporal_compression = self.config.vae.temporal_compression
-        target_action_length = action_index + 1
-        target_frames = (target_action_length - 1) // temporal_compression + 1
+        return (block_idx + 1) * self._latent_frames_per_block()
 
-        # Calculate how many frames to pop
-        frames_to_keep = target_frames
-        current_frames = current_logical_frame
-        frames_to_pop = current_frames - frames_to_keep
+    def _pop_latent_frames_from_cache(self, num_latent_frames: int) -> None:
+        """
+        Pop latent frames from KV cache.
 
-        if frames_to_pop > 0:
-            print(frames_to_pop)
-            visual_cache = self.cache_manager.get_caches()
-            for cache in visual_cache:
-                cache.pop_latent(frames_to_pop)
+        Note: cache.pop_latent() operates in BLOCK units, where 1 block = num_frame_per_block latent frames.
+        This method converts latent frames to blocks before popping.
 
-            return frames_to_keep  # New logical frame position
-        return current_logical_frame
+        Args:
+            num_latent_frames: Number of latent frames to remove
+        """
+        if num_latent_frames <= 0:
+            return
+
+        # Convert latent frames to blocks
+        # 1 block = num_frame_per_block latent frames (typically 3)
+        num_blocks_to_pop = num_latent_frames // self._latent_frames_per_block()
+
+        if num_blocks_to_pop <= 0:
+            return
+
+        visual_cache = self.cache_manager.get_caches()
+        for cache in visual_cache:
+            cache.pop_latent(num_blocks_to_pop)
+        print(
+            f"[Cache] Popped {num_blocks_to_pop} blocks "
+            f"({num_blocks_to_pop * self._latent_frames_per_block()} latent frames) from cache"
+        )
 
     @torch.no_grad()
     def inference(
@@ -156,10 +188,20 @@ class PoseAwarePipeline(BatchCausalInferencePipeline):
         1. Track poses throughout generation
         2. Adjust actions when they lead to poses close to history
         3. Truncate cache accordingly
+
+        Args:
+            noise: Latent noise tensor [batch, channels, latent_frames, height, width]
+            conditional_inputs: Action conditions aligned with video frames
+            return_latents: If True, return latent tensors; otherwise decoded videos
+            profile: Enable profiling (not implemented)
+
+        Returns:
+            List of decoded video tensors or latent tensors
         """
         assert noise.shape[1] == self.config.vae.latent_channels
         batch_size, num_channels, num_frames, height, width = noise.shape
 
+        # num_frames here refers to LATENT frames (not video frames)
         assert num_frames % self.config.inference.num_frame_per_block == 0
         num_blocks = num_frames // self.config.inference.num_frame_per_block
 
@@ -178,14 +220,16 @@ class PoseAwarePipeline(BatchCausalInferencePipeline):
         vae_cache = [None] * len(ZERO_VAE_CACHE)
         videos = []
 
-        current_start_frame = 0
-        logical_frame_position = 0
-        current_action_index = 0
+        # State tracking variables (all in latent frame units)
+        current_start_frame = 0  # Start index in output tensor (latent frames)
+        logical_frame_position = 0  # Total latent frames generated so far
+        current_action_index = 0  # Current position in action sequence
 
         all_num_frames = [self.config.inference.num_frame_per_block] * num_blocks
 
         for block_idx, current_num_frames in enumerate(tqdm(all_num_frames)):
-            # Calculate action sequence for this block
+            # current_num_frames: number of latent frames to generate in this block
+            # Calculate action sequence range for this block
             block_end_frame = logical_frame_position + current_num_frames
             action_seq_len = self.condition_processor.get_action_sequence_length(block_end_frame)
             block_start_action = current_action_index
@@ -194,25 +238,26 @@ class PoseAwarePipeline(BatchCausalInferencePipeline):
                 - self.condition_processor.get_action_sequence_length(logical_frame_position)
             )
 
-            # Pose adjustment logic (only after first few blocks)
+            # Pose adjustment logic: check if we should rollback to a previous state
+            # Only enabled after block 2 to have enough history
             if self.enable_pose_adjustment and block_idx >= 2:
-                # Extract first action of this block
+                # Extract the first action of this block
                 first_translation, first_rotation = self._extract_action_at_index(
                     conditional_inputs, block_start_action, batch_idx=0
                 )
 
-                # Check if adjustment needed
+                # Check if this action would lead to a pose similar to a previous one
                 (
                     adjusted_translation,
                     adjusted_rotation,
-                    truncate_block_idx,
+                    rollback_to_block_idx,
                 ) = self.pose_adjuster.adjust_first_action_and_get_cache_truncation(
                     first_translation, first_rotation
                 )
 
-                # Apply adjustment if needed
-                if truncate_block_idx is not None:
-                    # Update first action
+                # If rollback is needed (pose is close to a previous one)
+                if rollback_to_block_idx is not None:
+                    # Update the first action to exactly match the historical pose
                     self._update_action_at_index(
                         conditional_inputs,
                         block_start_action,
@@ -221,24 +266,22 @@ class PoseAwarePipeline(BatchCausalInferencePipeline):
                         batch_idx=0,
                     )
 
-                    # Truncate cache and pose history
-                    # Calculate the frame position corresponding to truncate_block_idx
-                    # Each block processes current_num_frames frames
-                    truncate_frame = (truncate_block_idx + 1) * current_num_frames
+                    # Calculate how many latent frames to keep
+                    target_latent_frames = self._block_to_latent_frames(rollback_to_block_idx)
 
-                    # Pop cache to go back to truncate_frame
-                    frames_to_pop = logical_frame_position - truncate_frame
-                    if frames_to_pop > 0:
-                        print(frames_to_pop)
-                        visual_cache = self.cache_manager.get_caches()
-                        for cache in visual_cache:
-                            cache.pop_latent(frames_to_pop // 3)
+                    # Pop excess latent frames from cache
+                    latent_frames_to_pop = logical_frame_position - target_latent_frames
+                    self._pop_latent_frames_from_cache(latent_frames_to_pop)
 
-                    self.pose_tracker.truncate_after_block(truncate_block_idx)
-                    logical_frame_position = truncate_frame
+                    # Truncate pose history to match
+                    self.pose_tracker.truncate_after_block(rollback_to_block_idx)
+
+                    # Update logical frame position
+                    logical_frame_position = target_latent_frames
 
                     print(
-                        f"[Block {block_idx}] Adjusted action & truncated to block {truncate_block_idx}"
+                        f"[Rollback] Block {block_idx} rolled back to block {rollback_to_block_idx}, "
+                        f"now at {logical_frame_position} latent frames"
                     )
 
             # Standard batch pipeline logic
@@ -265,29 +308,30 @@ class PoseAwarePipeline(BatchCausalInferencePipeline):
             video, vae_cache = self._decode_latent_to_video(denoised_pred, vae_cache)
             videos.append(video)
 
-            # Update pose tracker with NEW actions from this block only
+            # Update pose tracker with the new actions from this block
             if block_cond.translation_cond is not None:
-                # Extract only the new actions for this block
+                # Extract only the new actions applied in this block
                 num_new_actions = block_end_action - block_start_action
                 if num_new_actions > 0:
-                    # block_cond contains actions from 0 to block_end_action
-                    # We want only the last num_new_actions
+                    # block_cond contains the full action sequence up to block_end_action
+                    # We extract only the new actions added in this block
                     new_translations = block_cond.translation_cond[0][-num_new_actions:]
                     new_rotations = (
                         block_cond.rotation_cond[0][-num_new_actions:]
                         if block_cond.rotation_cond is not None
                         else torch.zeros(num_new_actions, 2)
                     )
-                    # Apply all actions and record final pose for this block
+                    # Apply actions sequentially and record the final pose for this block
                     self.pose_tracker.apply_block_actions(
                         translations=new_translations,
                         rotations=new_rotations,
                         block_idx=block_idx,
                     )
 
-            current_start_frame += current_num_frames
-            logical_frame_position += current_num_frames
-            current_action_index = block_end_action
+            # Advance state for next block
+            current_start_frame += current_num_frames  # Move forward in output tensor
+            logical_frame_position += current_num_frames  # Update total latent frames count
+            current_action_index = block_end_action  # Advance action index
 
         if return_latents:
             return output

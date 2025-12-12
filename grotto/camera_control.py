@@ -283,7 +283,7 @@ class NavigationPatternGenerator:
         for action in pattern.translation_actions:
             if action in self.config.translation.action_to_index:
                 idx = self.config.translation.action_to_index[action]
-                translation[:, idx] = 1.0
+                translation[:, idx] = 0.0
         result["translation"] = translation
 
         # Rotation tensor
