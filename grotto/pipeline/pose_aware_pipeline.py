@@ -50,8 +50,8 @@ class PoseAwarePipeline(BatchCausalInferencePipeline):
         device: str = "cuda",
         initial_pose: Optional[CameraPose] = None,
         enable_pose_adjustment: bool = True,
-        max_history_length: int = 8,
-        distance_threshold: float = 0.1,
+        max_history_length: int = 12,
+        distance_threshold: float = 0.05,
     ):
         """
         Initialize pose-aware pipeline.
@@ -64,7 +64,7 @@ class PoseAwarePipeline(BatchCausalInferencePipeline):
             initial_pose: Starting camera pose
             enable_pose_adjustment: Enable pose-based action adjustment
             max_history_length: Maximum history length to maintain (default: 8)
-            distance_threshold: Distance threshold for triggering rollback (default: 0.1)
+            distance_threshold: Distance threshold for triggering rollback (default: 0.05)
                 Rollback only occurs when predicted pose distance < threshold
         """
         super().__init__(config, predictor, vae_decoder, device)
@@ -106,23 +106,56 @@ class PoseAwarePipeline(BatchCausalInferencePipeline):
         new_rotation: torch.Tensor,
         batch_idx: int = 0,
     ) -> ConditionalInputs:
-        """
-        Update action at a specific index in conditional inputs.
-
-        Args:
-            conditional_inputs: Conditional inputs to modify
-            action_index: Index to update
-            new_translation: New translation action
-            new_rotation: New rotation action
-            batch_idx: Batch index to update
-
-        Returns:
-            Updated conditional inputs (modified in-place)
-        """
         conditional_inputs.translation_cond[batch_idx, action_index] = new_translation
         if conditional_inputs.rotation_cond is not None:
             conditional_inputs.rotation_cond[batch_idx, action_index] = new_rotation
         return conditional_inputs
+
+    def _insert_compensation_actions(
+        self,
+        conditional_inputs: ConditionalInputs,
+        insert_index: int,
+        translations: list[torch.Tensor],
+        rotations: list[torch.Tensor],
+    ) -> None:
+        if conditional_inputs.translation_cond is None:
+            return
+
+        batch_size = conditional_inputs.translation_cond.shape[0]
+        device = conditional_inputs.translation_cond.device
+        dtype = conditional_inputs.translation_cond.dtype
+
+        new_trans = (
+            torch.stack(translations, dim=0)
+            .unsqueeze(0)
+            .expand(batch_size, -1, -1)
+            .to(device=device, dtype=dtype)
+        )
+
+        conditional_inputs.translation_cond = torch.cat(
+            [
+                conditional_inputs.translation_cond[:, :insert_index],
+                new_trans,
+                conditional_inputs.translation_cond[:, insert_index + 1 :],
+            ],
+            dim=1,
+        )
+
+        if conditional_inputs.rotation_cond is not None:
+            new_rot = (
+                torch.stack(rotations, dim=0)
+                .unsqueeze(0)
+                .expand(batch_size, -1, -1)
+                .to(device=device, dtype=conditional_inputs.rotation_cond.dtype)
+            )
+            conditional_inputs.rotation_cond = torch.cat(
+                [
+                    conditional_inputs.rotation_cond[:, :insert_index],
+                    new_rot,
+                    conditional_inputs.rotation_cond[:, insert_index + 1 :],
+                ],
+                dim=1,
+            )
 
     def _latent_frames_per_block(self) -> int:
         """
@@ -220,85 +253,90 @@ class PoseAwarePipeline(BatchCausalInferencePipeline):
         vae_cache = [None] * len(ZERO_VAE_CACHE)
         videos = []
 
-        # State tracking variables (all in latent frame units)
-        current_start_frame = 0  # Start index in output tensor (latent frames)
-        logical_frame_position = 0  # Total latent frames generated so far
-        current_action_index = 0  # Current position in action sequence
+        logical_frame_position = 0
+        current_action_index = 0
+        block_idx = 0
+        # rollback_triggered = False
 
-        all_num_frames = [self.config.inference.num_frame_per_block] * num_blocks
+        pbar = tqdm(total=num_blocks)
 
-        for block_idx, current_num_frames in enumerate(tqdm(all_num_frames)):
-            # current_num_frames: number of latent frames to generate in this block
-            # Calculate action sequence range for this block
-            block_end_frame = logical_frame_position + current_num_frames
-            action_seq_len = self.condition_processor.get_action_sequence_length(block_end_frame)
-            block_start_action = current_action_index
-            block_end_action = block_start_action + (
-                action_seq_len
-                - self.condition_processor.get_action_sequence_length(logical_frame_position)
-            )
+        while logical_frame_position < num_frames:
+            latent_frames_per_block = self.config.inference.num_frame_per_block
+            next_frame_position = logical_frame_position + latent_frames_per_block
 
-            # Pose adjustment logic: check if we should rollback to a previous state
-            # Only enabled after block 2 to have enough history
-            if self.enable_pose_adjustment and block_idx >= 2:
-                # Extract the first action of this block
-                first_translation, first_rotation = self._extract_action_at_index(
-                    conditional_inputs, block_start_action, batch_idx=0
+            if conditional_inputs.translation_cond is not None:
+                num_new_actions = self.condition_processor.get_action_sequence_length(
+                    next_frame_position
+                ) - self.condition_processor.get_action_sequence_length(logical_frame_position)
+                remaining_actions = (
+                    conditional_inputs.translation_cond.shape[1] - current_action_index
                 )
 
-                # Check if this action would lead to a pose similar to a previous one
+                if remaining_actions < num_new_actions:
+                    print(
+                        f"[Early termination] Not enough actions remaining: "
+                        f"need {num_new_actions}, only {remaining_actions} left at frame {logical_frame_position}"
+                    )
+                    break
+            else:
+                num_new_actions = 0
+
+            if (
+                self.enable_pose_adjustment
+                and block_idx >= 2
+                and conditional_inputs.translation_cond is not None
+                and current_action_index < conditional_inputs.translation_cond.shape[1]
+            ):
+                first_translation, first_rotation = self._extract_action_at_index(
+                    conditional_inputs, current_action_index
+                )
+
                 (
-                    adjusted_translation,
-                    adjusted_rotation,
-                    rollback_to_block_idx,
+                    translations,
+                    rotations,
+                    rollback_frame_position,
+                    _,
                 ) = self.pose_adjuster.adjust_first_action_and_get_cache_truncation(
                     first_translation, first_rotation
                 )
 
-                # If rollback is needed (pose is close to a previous one)
-                if rollback_to_block_idx is not None:
-                    # Update the first action to exactly match the historical pose
-                    self._update_action_at_index(
-                        conditional_inputs,
-                        block_start_action,
-                        adjusted_translation,
-                        adjusted_rotation,
-                        batch_idx=0,
+                if rollback_frame_position is not None:
+                    self._pop_latent_frames_from_cache(
+                        logical_frame_position - rollback_frame_position
+                    )
+                    self.pose_tracker.truncate_to_frame_position(rollback_frame_position)
+                    logical_frame_position = rollback_frame_position
+                    # rollback_triggered = True
+
+                    self._insert_compensation_actions(
+                        conditional_inputs, current_action_index, translations, rotations
                     )
 
-                    # Calculate how many latent frames to keep
-                    target_latent_frames = self._block_to_latent_frames(rollback_to_block_idx)
-
-                    # Pop excess latent frames from cache
-                    latent_frames_to_pop = logical_frame_position - target_latent_frames
-                    self._pop_latent_frames_from_cache(latent_frames_to_pop)
-
-                    # Truncate pose history to match
-                    self.pose_tracker.truncate_after_block(rollback_to_block_idx)
-
-                    # Update logical frame position
-                    logical_frame_position = target_latent_frames
+                    next_frame_position = logical_frame_position + latent_frames_per_block
+                    num_new_actions = self.condition_processor.get_action_sequence_length(
+                        next_frame_position
+                    ) - self.condition_processor.get_action_sequence_length(logical_frame_position)
 
                     print(
-                        f"[Rollback] Block {block_idx} rolled back to block {rollback_to_block_idx}, "
-                        f"now at {logical_frame_position} latent frames"
+                        f"[Rollback] Block {block_idx}, "
+                        f"latent_frames={logical_frame_position}, action_index={current_action_index}"
                     )
 
-            # Standard batch pipeline logic
-            noisy_input = noise[
-                :, :, current_start_frame : current_start_frame + current_num_frames
-            ]
-
             block_cond, _ = self.condition_processor.slice_block_conditions(
-                conditional_inputs, current_start_frame, current_num_frames
+                conditional_inputs,
+                logical_frame_position,
+                latent_frames_per_block,
+                current_action_index,
             )
 
+            noisy_input = noise[
+                :, :, logical_frame_position : logical_frame_position + latent_frames_per_block
+            ]
             denoised_pred = self._denoise_block(
                 noisy_input, block_cond, logical_frame_position, batch_size
             )
-
             output[
-                :, :, current_start_frame : current_start_frame + current_num_frames
+                :, :, logical_frame_position : logical_frame_position + latent_frames_per_block
             ] = denoised_pred
 
             self._update_kv_cache_with_clean_context(
@@ -306,32 +344,45 @@ class PoseAwarePipeline(BatchCausalInferencePipeline):
             )
 
             video, vae_cache = self._decode_latent_to_video(denoised_pred, vae_cache)
+            # if rollback_triggered:
+            #     video = video[:, 8:, :, :, :]
+            #     rollback_triggered = False
             videos.append(video)
 
-            # Update pose tracker with the new actions from this block
-            if block_cond.translation_cond is not None:
-                # Extract only the new actions applied in this block
-                num_new_actions = block_end_action - block_start_action
-                if num_new_actions > 0:
-                    # block_cond contains the full action sequence up to block_end_action
-                    # We extract only the new actions added in this block
-                    new_translations = block_cond.translation_cond[0][-num_new_actions:]
-                    new_rotations = (
-                        block_cond.rotation_cond[0][-num_new_actions:]
-                        if block_cond.rotation_cond is not None
-                        else torch.zeros(num_new_actions, 2)
-                    )
-                    # Apply actions sequentially and record the final pose for this block
-                    self.pose_tracker.apply_block_actions(
-                        translations=new_translations,
-                        rotations=new_rotations,
-                        block_idx=block_idx,
-                    )
+            # Add black separator frames between blocks for easy visualization
+            if block_idx < num_blocks - 1:  # Don't add separator after the last block
+                num_separator_frames = 3  # Number of black frames to insert
+                # video shape: [batch, frames, channels, height, width]
+                batch_size_v, _, num_channels_v, height_v, width_v = video.shape
+                black_frames = torch.zeros(
+                    (batch_size_v, num_separator_frames, num_channels_v, height_v, width_v),
+                    device=video.device,
+                    dtype=video.dtype,
+                )
+                videos.append(black_frames)
 
-            # Advance state for next block
-            current_start_frame += current_num_frames  # Move forward in output tensor
-            logical_frame_position += current_num_frames  # Update total latent frames count
-            current_action_index = block_end_action  # Advance action index
+            if block_cond.translation_cond is not None and num_new_actions > 0:
+                new_translations = block_cond.translation_cond[0][-num_new_actions:]
+                new_rotations = (
+                    block_cond.rotation_cond[0][-num_new_actions:]
+                    if block_cond.rotation_cond is not None
+                    else torch.zeros(num_new_actions, 2, device=new_translations.device)
+                )
+                self.pose_tracker.apply_block_actions(
+                    translations=new_translations,
+                    rotations=new_rotations,
+                    block_idx=block_idx,
+                    logical_frame_position=logical_frame_position,
+                    action_index=current_action_index,
+                )
+
+            current_action_index += num_new_actions
+
+            logical_frame_position += latent_frames_per_block
+            block_idx += 1
+            pbar.update(1)
+
+        pbar.close()
 
         if return_latents:
             return output

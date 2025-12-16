@@ -17,6 +17,8 @@ from grotto.camera_pose import (
 @dataclass
 class PoseHistoryEntry:
     block_idx: int
+    logical_frame_position: int
+    action_index: int
     pose: CameraPose
 
 
@@ -26,15 +28,23 @@ class PoseTracker:
     def __init__(self, initial_pose: Optional[CameraPose] = None):
         self.history: List[PoseHistoryEntry] = []
         self.current_pose = initial_pose if initial_pose else CameraPose.identity()
-        self.history.append(PoseHistoryEntry(block_idx=0, pose=self.current_pose.clone()))
+        self.history.append(
+            PoseHistoryEntry(
+                block_idx=0,
+                logical_frame_position=0,
+                action_index=0,
+                pose=self.current_pose.clone(),
+            )
+        )
 
     def apply_block_actions(
         self,
         translations: torch.Tensor,
         rotations: torch.Tensor,
         block_idx: int,
+        logical_frame_position: int,
+        action_index: int,
     ) -> CameraPose:
-        """Apply all actions from a block and record the final pose."""
         transforms = []
         seq_len = translations.shape[0]
 
@@ -45,7 +55,14 @@ class PoseTracker:
             transforms.append(PoseTransform(translation=translation_3d, rotation=rotation_quat))
 
         self.current_pose = apply_transforms(self.current_pose, transforms)
-        self.history.append(PoseHistoryEntry(block_idx=block_idx, pose=self.current_pose.clone()))
+        self.history.append(
+            PoseHistoryEntry(
+                block_idx=block_idx,
+                logical_frame_position=logical_frame_position,
+                action_index=action_index,
+                pose=self.current_pose.clone(),
+            )
+        )
 
         return self.current_pose
 
@@ -76,9 +93,12 @@ class PoseTracker:
         actual_idx = search_start + idx
         return actual_idx, self.history[actual_idx], distance
 
-    def truncate_after_block(self, block_idx: int) -> None:
-        """Remove all history entries after the specified block."""
-        self.history = [entry for entry in self.history if entry.block_idx <= block_idx]
+    def truncate_to_frame_position(self, logical_frame_position: int) -> None:
+        self.history = [
+            entry
+            for entry in self.history
+            if entry.logical_frame_position <= logical_frame_position
+        ]
         if self.history:
             self.current_pose = self.history[-1].pose.clone()
 
@@ -107,7 +127,7 @@ class PoseActionAdjuster:
         self,
         pose_tracker: PoseTracker,
         max_history_length: int = 8,
-        distance_threshold: float = 0.1,
+        distance_threshold: float = 0.05,
     ):
         self.pose_tracker = pose_tracker
         self.max_history_length = max_history_length
@@ -117,8 +137,7 @@ class PoseActionAdjuster:
         self,
         first_action_translation: torch.Tensor,
         first_action_rotation: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, Optional[int]]:
-        """Adjust the first action to align with closest historical pose."""
+    ) -> tuple[List[torch.Tensor], List[torch.Tensor], Optional[int], Optional[int]]:
         translation_3d = self.pose_tracker._action_to_translation_3d(first_action_translation)
         pitch, yaw = first_action_rotation[0].item(), first_action_rotation[1].item()
         rotation_quat = self.pose_tracker._euler_delta_to_quaternion(
@@ -129,44 +148,69 @@ class PoseActionAdjuster:
         predicted_pose = apply_transforms(self.pose_tracker.current_pose, [transform])
 
         current_history_length = len(self.pose_tracker.history)
-        search_start = 2
+        search_start = 1
         search_end = None
 
         if current_history_length > self.max_history_length:
-            search_start = 2
+            search_start = 1
             search_end = self.max_history_length - 1
             print(
                 f"[PoseAdjuster] History length {current_history_length} > {self.max_history_length}, "
                 f"limiting search to blocks {search_start}-{search_end-1}"
             )
 
-        hist_idx, hist_entry, distance = self.pose_tracker.find_closest_historical_pose(
-            predicted_pose, search_start=search_start, search_end=search_end
-        )
-        if hist_idx == -1:
-            return first_action_translation, first_action_rotation, None
+        if search_end is None:
+            search_end = len(self.pose_tracker.history) - 1
+        else:
+            search_end = min(search_end, len(self.pose_tracker.history) - 1)
 
-        # Check if the pose is close enough to trigger rollback
-        if distance >= self.distance_threshold:
+        if search_start >= search_end:
+            return [first_action_translation], [first_action_rotation], None, None
+
+        earliest_entry = None
+        earliest_distance = None
+
+        from grotto.camera_pose import quaternion_angular_distance
+
+        for idx in range(search_start, search_end):
+            entry = self.pose_tracker.history[idx]
+            pos_dist = torch.sum((predicted_pose.position - entry.pose.position) ** 2).item()
+            rot_dist = quaternion_angular_distance(predicted_pose.rotation, entry.pose.rotation)
+            distance = pos_dist + rot_dist
+
+            if distance < self.distance_threshold:
+                earliest_entry = entry
+                earliest_distance = distance
+                break
+
+        if earliest_entry is None:
             print(
-                f"[PoseAdjuster] Distance {distance:.4f} >= threshold {self.distance_threshold}, "
+                f"[PoseAdjuster] No pose found within threshold {self.distance_threshold}, "
                 "no rollback"
             )
-            return first_action_translation, first_action_rotation, None
+            return [first_action_translation], [first_action_rotation], None, None
 
-        # Pose is close enough, compute adjusted action
         print(
-            f"[PoseAdjuster] Distance {distance:.4f} < threshold {self.distance_threshold}, "
-            f"triggering rollback to block {hist_entry.block_idx}"
+            f"[PoseAdjuster] Distance {earliest_distance:.4f} < threshold {self.distance_threshold}, "
+            f"triggering rollback to block {earliest_entry.block_idx}, frame {earliest_entry.logical_frame_position}, action {earliest_entry.action_index}"
         )
 
-        adjusted_transform = compute_transform(hist_entry.pose, predicted_pose)
-        adjusted_translation = self._translation_3d_to_action(adjusted_transform.translation)
-        adjusted_rotation = self._quaternion_to_euler_delta(adjusted_transform.rotation)
+        adjusted_transform = compute_transform(earliest_entry.pose, predicted_pose)
+        full_translation = self._translation_3d_to_action(adjusted_transform.translation)
+        full_rotation = self._quaternion_to_euler_delta(adjusted_transform.rotation)
 
-        truncate_block_idx = hist_entry.block_idx
+        quarter_translation = full_translation / 4.0
+        quarter_rotation = full_rotation / 4.0
 
-        return adjusted_translation, adjusted_rotation, truncate_block_idx
+        translations = [quarter_translation.clone() for _ in range(4)]
+        rotations = [quarter_rotation.clone() for _ in range(4)]
+
+        return (
+            translations,
+            rotations,
+            earliest_entry.logical_frame_position,
+            earliest_entry.action_index,
+        )
 
     def _translation_3d_to_action(self, translation_3d: torch.Tensor) -> torch.Tensor:
         """Convert 3D translation back to action space."""

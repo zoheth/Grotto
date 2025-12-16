@@ -167,11 +167,13 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
         all_num_frames = [self.config.inference.num_frame_per_block] * num_blocks
 
         for _block_idx, current_num_frames in enumerate(tqdm(all_num_frames)):
-            if _block_idx >= 6 and _block_idx <= 7:
+            if _block_idx >= 5 and (_block_idx - 5) % 7 <= 3:
                 visual_cache = self.cache_manager.get_caches()
                 for cache in visual_cache:
-                    cache.pop_latent(_block_idx - 4)
-                logical_frame_position -= (_block_idx - 4) * current_num_frames
+                    cache.pop_latent(1 if (_block_idx - 5) % 7 == 0 else 2)
+                logical_frame_position -= (
+                    1 if (_block_idx - 5) % 7 == 0 else 2
+                ) * current_num_frames
             print(logical_frame_position)
 
             noisy_input = noise[
@@ -179,7 +181,9 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
             ]
 
             block_cond, _ = self.condition_processor.slice_block_conditions(
-                conditional_inputs, current_start_frame, current_num_frames
+                conditional_inputs,
+                current_start_frame,
+                current_num_frames,
             )
 
             denoised_pred = self._denoise_block(
@@ -200,6 +204,16 @@ class BatchCausalInferencePipeline(BaseCausalInferencePipeline):
             #     video = video[:, 4:, :, :, :]
             # if _block_idx==4 or _block_idx==5:
             videos.append(video)
+
+            # num_separator_frames = 3  # Number of black frames to insert
+            # # video shape: [batch, frames, channels, height, width]
+            # batch_size_v, _, num_channels_v, height_v, width_v = video.shape
+            # black_frames = torch.zeros(
+            #     (batch_size_v, num_separator_frames, num_channels_v, height_v, width_v),
+            #     device=video.device,
+            #     dtype=video.dtype
+            # )
+            # videos.append(black_frames)
 
             current_start_frame += current_num_frames
             logical_frame_position += current_num_frames

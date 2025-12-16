@@ -6,9 +6,6 @@ from einops import rearrange
 from torch import nn
 
 from grotto.modeling.modular_action.action_config import ActionConfig
-from grotto.modeling.modular_action.kernels.preprocessor_kernel import (
-    rotation_preprocessor_triton,
-)
 
 
 class ViewControlInjector(nn.Module):
@@ -81,15 +78,46 @@ class ViewControlInjector(nn.Module):
         H, W = spatial_shape
         S = H * W
 
-        fused = rotation_preprocessor_triton(
-            x,
-            condition,
-            T,
-            self.action_config.vae_time_compression_ratio,
-            self.action_config.windows_size,
-            num_frame_per_block,
+        if condition.shape[1] > 9:
+            condition = condition[:, -12:, :]
+
+        B, N_frames, C = condition.shape  # (1, 9, 2) (1, 12, 2)
+        action_len = 20
+        pad_len = 12
+        zeros_pad = torch.zeros(
+            (B, action_len - N_frames, C), device=condition.device, dtype=condition.dtype
         )
-        fused = fused.reshape(B * S, T, -1)
+        mouse_padded = torch.cat([zeros_pad, condition], dim=1)
+        windows = []
+        for i in range(num_frame_per_block):  # 0, 1, 2
+            start = i * 4  # ratio * i
+            end = start + pad_len
+            win = mouse_padded[:, start:end, :]
+            windows.append(win)
+
+        group_mouse = torch.stack(windows, dim=1)  # (1, 3, 12, 2)
+
+        # ==========================================
+        # 3. 维度调整 (Flatten & Expand)
+        # ==========================================
+        # 变为 (1, 3, 24)
+        group_mouse = group_mouse.flatten(2)
+
+        # 广播到空间维度 S
+        S = 880  # th * tw
+        group_mouse = group_mouse.unsqueeze(1).expand(-1, S, -1, -1)  # (1, 880, 3, 24)
+        group_mouse = group_mouse.reshape(B * S, num_frame_per_block, -1)  # (880, 3, 24)
+        fused = torch.cat([x.reshape(B * S, T, C_img), group_mouse], dim=-1)
+
+        # fused = rotation_preprocessor_triton(
+        #     x,
+        #     condition,
+        #     T,
+        #     self.action_config.vae_time_compression_ratio,
+        #     self.action_config.windows_size,
+        #     num_frame_per_block,
+        # )
+        # fused = fused.reshape(B * S, T, -1)
         fused = self.view_mlp(fused)
 
         qkv = self.t_qkv(fused)

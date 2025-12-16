@@ -41,17 +41,20 @@ class ConditionProcessor:
         conditional_inputs: ConditionalInputs,
         current_start_frame: int,
         num_frames: int,
+        current_action_index: int = 0,
     ) -> tuple[ConditionalInputs, ConditionalInputs]:
         current_block_end = current_start_frame + num_frames
-        action_seq_len = self.get_action_sequence_length(current_block_end)
-
+        action_end = current_action_index + self.get_action_sequence_length(current_block_end)
+        print(
+            f"current_block_end: {current_block_end}, action_end: {action_end}, current_action_index: {current_action_index}"
+        )
         block_cond = ConditionalInputs(
             cond_concat=conditional_inputs.cond_concat[:, :, current_start_frame:current_block_end],
             visual_context=conditional_inputs.visual_context,
-            rotation_cond=conditional_inputs.rotation_cond[:, :action_seq_len]
+            rotation_cond=conditional_inputs.rotation_cond[:, current_action_index:action_end]
             if conditional_inputs.rotation_cond is not None
             else None,
-            translation_cond=conditional_inputs.translation_cond[:, :action_seq_len]
+            translation_cond=conditional_inputs.translation_cond[:, current_action_index:action_end]
             if conditional_inputs.translation_cond is not None
             else None,
         )

@@ -504,7 +504,7 @@ def generate_left_right_sequence(
 
 def generate_left_right_yaw_sequence(
     total_frames: int = 57,
-    frames_per_group: int = 48,  # N: 每组的帧数
+    frames_per_group: int = 42,  # N: 每组的帧数
     base_yaw: float = 0.1,  # x: 基础旋转值
     config: CameraControlConfig | None = None,
 ) -> CameraControlTensors:
